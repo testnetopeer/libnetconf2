@@ -31,15 +31,11 @@ before_install:
   - cmake -DCMAKE_INSTALL_PREFIX:PATH=/usr .. && make -j2 && sudo make install
   - cd ../..
 
-  - echo $COVERITY_SCAN_PROJECT_NAME
-  - echo $COVERITY_SCAN_TOKEN
-  - echo $SCAN_URL
-
 env:
   global:
    # The next declaration is the encrypted COVERITY_SCAN_TOKEN, created
    #   via the "travis encrypt" command using the project repo's public key
-    - secure: "mNZta3ZKomYx+CMOLPfkPG3Sk8/AwIlcqHOtB/1mbIhCYpocDxDb3s6IhvcPcGpK+1T4fHNFQJogfkQL1VNO5Ox5g3Jol8JsTD2eD6gKU6ohuhqQRzFRoNgZclQJDtb2yXxtLltaC3UsMKxMxCI+Siyr8Hs4ZDA4AYoADDW60O6Sh6TFDcYbMhQYT+ln6ythIemW4nWPCitOr1yZH5QT1YZFW5qp7ycNpE/+tQ2P+PkL50gjzKnKaVrI8vFpRnOk2UUzl37fL/NafGdGslM+0f5cV7FAyL5dhlH7yljg3o8+5Xi/4JBzQxC423uKlmoTKpv9Uh37pm8f9Gh4I3cJTv1APW22ZevXgGC7BRG1nI5E6Y4vPT4MDvufucwz+kl5/mshM/4SgiWdpILf58bzts3XTrDQcfw8ByH3hJa9+2BW7edGPL6jg/6Dpvwz9nNFe6GtbVh45+X2iFp90moyLjEwf3I8gVKq7wl/Fk8ncbjtGLZB7sRTvTFyClF6B9ttiyfYukdF4CVfeTZVvVEFXBBN8iei5rtKcq6KShabOiqkcTcEgmsNC9LBtc/ZbsT4YU1HpKiYOhvnFfQB+T8/fjSUpcG621uzy+OHwbZ2HwZnQ+uOJLBEFyDFQApwFKlFknYdAVGkkEbq6Na2qZ3QOfp1cYGdISC5wA9ewgbUIXc="
+    - secure: "Iqj+Zdu6+oIi/ERwJreofwiyQ9zwTqME68AyNX6nNTGmiAq+LQM8XMqoyKdfCpm8Ui9BQs1qGgvEQhY2ZRW+Ko9d5ervr3ZEpbXilEoog1HD4ZgZ/Vt9eldOkA6PWD/xKFNvZvtwxfdpBXAYveycvT76z0FKBuq9lAFo032QvY5bhbjQR5sN2sP80fIyQHGls9sOpuElMAgP4h5Oys83PkOD+kqG6UVn7zW2xi8AwWhFlFUXMdusXzsTTwbbqG6aV+7BQC74GyJsKUz3Zk+g0mMerNqs7ihzkKC3QHRsDRjg+X4E5EchQtsTsbw9+pu13cALj+PFNixOg4r9MMf0LXNohMWvBw59Lg9ppF8E6VKoMF5Rqz6kPgyIPbZGPxVIuEvdP+V8k5qYYQM70cM/11hx3k0x7EDQ1b68FgnYdZjhh1oBGQJZGvBWMc0hS3uJ7eEZeSbcvpxMLze7+XapAVDZE3lXOveeAFe+KRCSvjGcpMhDzXPZGZhJSFmLYZ+tMgPAPSvHfHmVotNESr8NoEdr6kURPJKviQTUF/ZoXAMcOhezDm/Xn478atZ8B+VSyLRdSUuuHvT98USgGTaAttmfPxxncmVEkdJW6bYICZKXADKKrPHes7joREWXKvgbOe8n5glGKoWR2xz1EXCtkCQi9jdtYHfPl9Ll+RK3yGM="
 
 addons:
   coverity_scan:
@@ -50,6 +46,5 @@ addons:
     build_command: "make"
     branch_pattern: coverity
 
-script: 
-  - echo "Coverity build done."
+script:
 
