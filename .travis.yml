@@ -33,20 +33,20 @@ before_install:
   - cmake -DCMAKE_INSTALL_PREFIX:PATH=/usr .. && make -j2 && sudo make install
   - cd ../..
 
-#env:
-#  global:
-#   # The next declaration is the encrypted COVERITY_SCAN_TOKEN, created
-#   #   via the "travis encrypt" command using the project repo's public key
-#   - secure: ""
+env:
+  global:
+   # The next declaration is the encrypted COVERITY_SCAN_TOKEN, created
+   #   via the "travis encrypt" command using the project repo's public key
+    - secure: "rkYfnik8e2u/Dldzx5qZFgxRx9LlcokWmGk6vRG9O3VrXAhB9q1qWv9xtHc1OLp6LFeuLULFnoyru2EHM2gfu9az5Le2PE8nXy7a84NbTiSaXn/osyofPWAJ0+4NlWOhPxyOIi1MhCVVCHQkrHhkW9mBYX9WMBOG726Gx5DLeX4="
 
-#addons:
-#  coverity_scan:
-#    project:
-#      name: "CESNET/libnetconf2"
-#    notification_email: rkrejci@cesnet.cz
-#    build_command_prepend: "mkdir build ; cd build ; cmake .. ; make clean"
-#    build_command: "make"
-#    branch_pattern: coverity
+addons:
+  coverity_scan:
+    project:
+      name: "CESNET/libnetconf2"
+    notification_email: rkrejci@cesnet.cz
+    build_command_prepend: "mkdir build ; cd build ; cmake .. ; make clean"
+    build_command: "make"
+    branch_pattern: coverity
 
 script: 
   - mkdir build && cd build ; cmake -DENABLE_TLS=ON -DENABLE_SSH=ON .. && make -j2 && make test
