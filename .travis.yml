@@ -47,4 +47,6 @@ addons:
     branch_pattern: coverity
 
 script:
+  # do nothing, everything here is done in coverity addon
+  - true
 
