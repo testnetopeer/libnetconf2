@@ -173,7 +173,7 @@ nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout, NC
     }
 
     ret = accept(sock, (struct sockaddr *)&saddr, &saddr_len);
-    if (ret == -1) {
+    if (ret < 0) {
         ERR("Accept failed (%s).", strerror(errno));
         return -1;
     }
@@ -429,6 +429,7 @@ nc_ps_free(struct nc_pollsession *ps)
         return;
     }
 
+    free(ps->pfds);
     free(ps->sessions);
     free(ps);
 }
@@ -442,22 +443,23 @@ nc_ps_add_session(struct nc_pollsession *ps, struct nc_session *session)
     }
 
     ++ps->session_count;
+    ps->pfds = realloc(ps->pfds, ps->session_count * sizeof *ps->pfds);
     ps->sessions = realloc(ps->sessions, ps->session_count * sizeof *ps->sessions);
 
     switch (session->ti_type) {
     case NC_TI_FD:
-        ps->sessions[ps->session_count - 1].fd = session->ti.fd.in;
+        ps->pfds[ps->session_count - 1].fd = session->ti.fd.in;
         break;
 
 #ifdef ENABLE_SSH
     case NC_TI_LIBSSH:
-        ps->sessions[ps->session_count - 1].fd = ssh_get_fd(session->ti.libssh.session);
+        ps->pfds[ps->session_count - 1].fd = ssh_get_fd(session->ti.libssh.session);
         break;
 #endif
 
 #ifdef ENABLE_TLS
     case NC_TI_OPENSSL:
-        ps->sessions[ps->session_count - 1].fd = SSL_get_rfd(session->ti.tls);
+        ps->pfds[ps->session_count - 1].fd = SSL_get_rfd(session->ti.tls);
         break;
 #endif
 
@@ -465,9 +467,9 @@ nc_ps_add_session(struct nc_pollsession *ps, struct nc_session *session)
         ERRINT;
         return -1;
     }
-    ps->sessions[ps->session_count - 1].events = POLLIN;
-    ps->sessions[ps->session_count - 1].revents = 0;
-    ps->sessions[ps->session_count - 1].session = session;
+    ps->pfds[ps->session_count - 1].events = POLLIN;
+    ps->pfds[ps->session_count - 1].revents = 0;
+    ps->sessions[ps->session_count - 1] = session;
 
     return 0;
 }
@@ -483,9 +485,10 @@ nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session)
     }
 
     for (i = 0; i < ps->session_count; ++i) {
-        if (ps->sessions[i].session == session) {
+        if (ps->sessions[i] == session) {
             --ps->session_count;
-            memcpy(&ps->sessions[i], &ps->sessions[ps->session_count], sizeof *ps->sessions);
+            ps->sessions[i] = ps->sessions[ps->session_count];
+            memcpy(&ps->pfds[i], &ps->pfds[ps->session_count], sizeof *ps->pfds);
             return 0;
         }
     }
@@ -584,12 +587,12 @@ API int
 nc_ps_poll(struct nc_pollsession *ps, int timeout)
 {
     int ret;
-    uint16_t i;
+    uint16_t i, j;
     time_t cur_time;
     NC_MSG_TYPE msgtype;
     struct nc_session *session;
     struct nc_server_rpc *rpc;
-    struct timespec old_ts, new_ts;
+    struct timespec old_ts;
 
     if (!ps || !ps->session_count) {
         ERRARG;
@@ -599,20 +602,20 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout)
     cur_time = time(NULL);
 
     for (i = 0; i < ps->session_count; ++i) {
-        if (ps->sessions[i].session->status != NC_STATUS_RUNNING) {
-            ERR("Session %u: session not running.", ps->sessions[i].session->id);
+        if (ps->sessions[i]->status != NC_STATUS_RUNNING) {
+            ERR("Session %u: session not running.", ps->sessions[i]->id);
             return -1;
         }
 
         /* TODO invalidate only sessions without subscription */
-        if (server_opts.idle_timeout && (ps->sessions[i].session->last_rpc + server_opts.idle_timeout >= cur_time)) {
-            ERR("Session %u: session idle timeout elapsed.", ps->sessions[i].session->id);
-            ps->sessions[i].session->status = NC_STATUS_INVALID;
-            ps->sessions[i].session->term_reason = NC_SESSION_TERM_TIMEOUT;
+        if (server_opts.idle_timeout && (ps->sessions[i]->last_rpc + server_opts.idle_timeout >= cur_time)) {
+            ERR("Session %u: session idle timeout elapsed.", ps->sessions[i]->id);
+            ps->sessions[i]->status = NC_STATUS_INVALID;
+            ps->sessions[i]->term_reason = NC_SESSION_TERM_TIMEOUT;
             return 3;
         }
 
-        if (ps->sessions[i].revents) {
+        if (ps->pfds[i].revents) {
             break;
         }
     }
@@ -622,10 +625,10 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout)
     }
 
     if (i == ps->session_count) {
+retry_poll:
         /* no leftover event */
         i = 0;
-retry_poll:
-        ret = poll((struct pollfd *)ps->sessions, ps->session_count, timeout);
+        ret = poll(ps->pfds, ps->session_count, timeout);
         if (ret < 1) {
             return ret;
         }
@@ -633,37 +636,47 @@ retry_poll:
 
     /* find the first fd with POLLIN, we don't care if there are more now */
     for (; i < ps->session_count; ++i) {
-        if (ps->sessions[i].revents & POLLHUP) {
-            ERR("Session %u: communication socket unexpectedly closed.", ps->sessions[i].session->id);
-            ps->sessions[i].session->status = NC_STATUS_INVALID;
-            ps->sessions[i].session->term_reason = NC_SESSION_TERM_DROPPED;
+        if (ps->pfds[i].revents & POLLHUP) {
+            ERR("Session %u: communication socket unexpectedly closed.", ps->sessions[i]->id);
+            ps->sessions[i]->status = NC_STATUS_INVALID;
+            ps->sessions[i]->term_reason = NC_SESSION_TERM_DROPPED;
             return 3;
-        } else if (ps->sessions[i].revents & POLLERR) {
-            ERR("Session %u: communication socket error.", ps->sessions[i].session->id);
-            ps->sessions[i].session->status = NC_STATUS_INVALID;
-            ps->sessions[i].session->term_reason = NC_SESSION_TERM_OTHER;
+        } else if (ps->pfds[i].revents & POLLERR) {
+            ERR("Session %u: communication socket error.", ps->sessions[i]->id);
+            ps->sessions[i]->status = NC_STATUS_INVALID;
+            ps->sessions[i]->term_reason = NC_SESSION_TERM_OTHER;
             return 3;
-        } else if (ps->sessions[i].revents & POLLIN) {
+        } else if (ps->pfds[i].revents & POLLIN) {
 #ifdef ENABLE_SSH
-            if (ps->sessions[i].session->ti_type == NC_TI_LIBSSH) {
-                /* things are not that simple with SSH, we need to check the channel */
-                ret = ssh_channel_poll_timeout(ps->sessions[i].session->ti.libssh.channel, 0, 0);
-                /* not this one */
-                if (!ret) {
+            if (ps->sessions[i]->ti_type == NC_TI_LIBSSH) {
+                /* things are not that simple with SSH... */
+                ret = nc_ssh_pollin(ps->sessions[i], &timeout);
+
+                /* clear POLLIN on sessions sharing this session's SSH session */
+                if ((ret == 1) || (ret >= 4)) {
+                    for (j = i + 1; j < ps->session_count; ++j) {
+                        if (ps->pfds[j].fd == ps->pfds[i].fd) {
+                            ps->pfds[j].revents = 0;
+                        }
+                    }
+                }
+
+                /* actual event happened */
+                if ((ret <= 0) || (ret >= 3)) {
+                    ps->pfds[i].revents = 0;
+                    return ret;
+
+                /* event occurred on some other channel */
+                } else if (ret == 2) {
+                    ps->pfds[i].revents = 0;
                     if (i == ps->session_count - 1) {
                         /* last session and it is not the right channel, ... */
                         if (timeout > 0) {
                             /* ... decrease timeout, wait it all out and try again, last time */
-                            clock_gettime(CLOCK_MONOTONIC_RAW, &new_ts);
-
-                            timeout -= (new_ts.tv_sec - old_ts.tv_sec) * 1000;
-                            timeout -= (new_ts.tv_nsec - old_ts.tv_nsec) / 1000000;
-                            if (timeout < 0) {
-                                ERRINT;
-                                return -1;
-                            }
-
-                            old_ts = new_ts;
+                            nc_subtract_elapsed(&timeout, &old_ts);
+                            usleep(timeout * 1000);
+                            timeout = 0;
+                            goto retry_poll;
                         } else if (!timeout) {
                             /* ... timeout is 0, so that is it */
                             return 0;
@@ -674,26 +687,13 @@ retry_poll:
                         }
                     }
                     /* check other sessions */
-                    ps->sessions[i].revents = 0;
                     continue;
-                } else if (ret == SSH_ERROR) {
-                    ERR("Session %u: SSH channel error (%s).", ps->sessions[i].session->id,
-                        ssh_get_error(ps->sessions[i].session->ti.libssh.session));
-                    ps->sessions[i].session->status = NC_STATUS_INVALID;
-                    ps->sessions[i].session->term_reason = NC_SESSION_TERM_OTHER;
-                    return 3;
-                } else if (ret == SSH_EOF) {
-                    ERR("Session %u: communication channel unexpectedly closed (libssh).",
-                        ps->sessions[i].session->id);
-                    ps->sessions[i].session->status = NC_STATUS_INVALID;
-                    ps->sessions[i].session->term_reason = NC_SESSION_TERM_DROPPED;
-                    return 3;
                 }
             }
 #endif /* ENABLE_SSH */
 
             /* we are going to process it now */
-            ps->sessions[i].revents = 0;
+            ps->pfds[i].revents = 0;
             break;
         }
     }
@@ -704,18 +704,10 @@ retry_poll:
     }
 
     /* this is the session with some data available for reading */
-    session = ps->sessions[i].session;
+    session = ps->sessions[i];
 
     if (timeout > 0) {
-        clock_gettime(CLOCK_MONOTONIC_RAW, &new_ts);
-
-        /* subtract elapsed time */
-        timeout -= (new_ts.tv_sec - old_ts.tv_sec) * 1000;
-        timeout -= (new_ts.tv_nsec - old_ts.tv_nsec) / 1000000;
-        if (timeout < 0) {
-            ERRINT;
-            return -1;
-        }
+        nc_subtract_elapsed(&timeout, &old_ts);
     }
 
     /* reading an RPC and sending a reply must be atomic (no other RPC should be read) */
@@ -752,7 +744,7 @@ retry_poll:
 
     /* is there some other socket waiting? */
     for (++i; i < ps->session_count; ++i) {
-        if (ps->sessions[i].revents) {
+        if (ps->pfds[i].revents) {
             return 2;
         }
     }
@@ -889,7 +881,7 @@ nc_accept(int timeout, struct nc_session **session)
     sock = ret;
 
     *session = calloc(1, sizeof **session);
-    if (!session) {
+    if (!(*session)) {
         ERRMEM;
         close(sock);
         return -1;
