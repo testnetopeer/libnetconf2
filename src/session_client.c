@@ -38,32 +38,33 @@
 
 #include "libnetconf.h"
 #include "session_client.h"
+#include "messages_client.h"
 
 static const char *ncds2str[] = {NULL, "config", "url", "running", "startup", "candidate"};
 
-static char *schema_searchpath;
+static struct nc_client_opts client_opts;
 
 API int
-nc_schema_searchpath(const char *path)
+nc_client_schema_searchpath(const char *path)
 {
-    if (schema_searchpath) {
-        free(schema_searchpath);
+    if (client_opts.schema_searchpath) {
+        free(client_opts.schema_searchpath);
     }
 
     if (path) {
-        schema_searchpath = strdup(path);
-        if (!schema_searchpath) {
+        client_opts.schema_searchpath = strdup(path);
+        if (!client_opts.schema_searchpath) {
             ERRMEM;
             return 1;
         }
     } else {
-        schema_searchpath = NULL;
+        client_opts.schema_searchpath = NULL;
     }
 
     return 0;
 }
 
-/* SCHEMAS_DIR not used */
+/* SCHEMAS_DIR not used (implicitly) */
 static int
 ctx_check_and_load_model(struct nc_session *session, const char *cpblt)
 {
@@ -74,8 +75,8 @@ ctx_check_and_load_model(struct nc_session *session, const char *cpblt)
     /* parse module */
     ptr = strstr(cpblt, "module=");
     if (!ptr) {
-        WRN("Unknown capability \"%s\" could not be parsed.", cpblt);
-        return 1;
+        ERR("Unknown capability \"%s\" could not be parsed.", cpblt);
+        return -1;
     }
     ptr += 7;
     ptr2 = strchr(ptr, '&');
@@ -101,11 +102,13 @@ ctx_check_and_load_model(struct nc_session *session, const char *cpblt)
         module = ly_ctx_load_module(session->ctx, model_name, revision);
     }
 
-    free(model_name);
     free(revision);
     if (!module) {
+        WRN("Failed to load model \"%s\".", model_name);
+        free(model_name);
         return 1;
     }
+    free(model_name);
 
     /* parse features */
     ptr = strstr(cpblt, "features=");
@@ -250,10 +253,11 @@ libyang_module_clb(const char *name, const char *revision, void *user_data, LYS_
     return model_data;
 }
 
+/* return 0 - ok, 1 - some models failed to load, -1 - error */
 int
 nc_ctx_check_and_fill(struct nc_session *session)
 {
-    int i, get_schema_support = 0;
+    int i, get_schema_support = 0, ret = 0, r;
     ly_module_clb old_clb = NULL;
     void *old_data = NULL;
 
@@ -283,7 +287,7 @@ nc_ctx_check_and_fill(struct nc_session *session)
         if (old_clb) {
             ly_ctx_set_module_clb(session->ctx, old_clb, old_data);
         }
-        return 1;
+        return -1;
     }
 
     /* load all other models */
@@ -293,13 +297,39 @@ nc_ctx_check_and_fill(struct nc_session *session)
             continue;
         }
 
-        ctx_check_and_load_model(session, session->cpblts[i]);
+        r = ctx_check_and_load_model(session, session->cpblts[i]);
+        if (r == -1) {
+            ret = -1;
+            break;
+        }
+
+        /* failed to load schema, but let's try to find it using user callback (or locally, if not set),
+         * if it was using get-schema */
+        if (r == 1) {
+            if (get_schema_support) {
+                VRB("Trying to load the schema from a different source.");
+                /* works even if old_clb is NULL */
+                ly_ctx_set_module_clb(session->ctx, old_clb, old_data);
+                r = ctx_check_and_load_model(session, session->cpblts[i]);
+            }
+
+            /* fail again (or no other way to try), too bad */
+            if (r) {
+                ret = 1;
+            }
+
+            /* set get-schema callback back */
+            ly_ctx_set_module_clb(session->ctx, &libyang_module_clb, session);
+        }
     }
 
     if (old_clb) {
         ly_ctx_set_module_clb(session->ctx, old_clb, old_data);
     }
-    return 0;
+    if (ret == 1) {
+        WRN("Some models failed to be loaded, any data from these models will be ignored.");
+    }
+    return ret;
 }
 
 API struct nc_session *
@@ -340,7 +370,7 @@ nc_connect_inout(int fdin, int fdout, struct ly_ctx *ctx)
     }
     session->status = NC_STATUS_RUNNING;
 
-    if (nc_ctx_check_and_fill(session)) {
+    if (nc_ctx_check_and_fill(session) == -1) {
         goto fail;
     }
 
@@ -408,21 +438,14 @@ errloop:
 static NC_MSG_TYPE
 get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_elem **msg)
 {
-    int r, elapsed;
+    int r, elapsed = 0;
     char *ptr;
     const char *str_msgid;
     uint64_t cur_msgid;
     struct lyxml_elem *xml;
-    struct nc_msg_cont *cont, *prev_cont, **cont_ptr;
+    struct nc_msg_cont *cont, **cont_ptr;
     NC_MSG_TYPE msgtype = 0; /* NC_MSG_ERROR */
 
-next_message:
-    if (msgtype) {
-        /* second run, wait and give a chance to nc_recv_reply() */
-        usleep(NC_TIMEOUT_STEP);
-        timeout -= NC_TIMEOUT_STEP;
-    }
-    elapsed = 0;
     r = nc_timedlock(session->ti_lock, timeout, &elapsed);
     if (r == -1) {
         /* error */
@@ -450,18 +473,15 @@ next_message:
 
     /* try to get rpc-reply from the session's queue */
     if (msgid && session->replies) {
-        prev_cont = NULL;
-        for (cont = session->replies; cont; cont = cont->next) {
-            /* errors checked in the condition below */
+        while (session->replies) {
+            cont = session->replies;
+            session->replies = cont->next;
+
             str_msgid = lyxml_get_attr(cont->msg, "message-id", NULL);
             cur_msgid = strtoul(str_msgid, &ptr, 10);
 
             if (cur_msgid == msgid) {
-                if (!prev_cont) {
-                    session->replies = cont->next;
-                } else {
-                    prev_cont->next = cont->next;
-                }
+                session->replies = cont->next;
                 pthread_mutex_unlock(session->ti_lock);
 
                 *msg = cont->msg;
@@ -470,7 +490,9 @@ next_message:
                 return NC_MSG_REPLY;
             }
 
-            prev_cont = cont;
+            ERR("Session %u: discarding a <rpc-reply> with an unexpected message-id \"%s\".", str_msgid);
+            lyxml_free(session->ctx, cont->msg);
+            free(msg);
         }
     }
 
@@ -485,7 +507,7 @@ next_message:
             pthread_mutex_unlock(session->ti_lock);
             ERR("Session %u: received a <rpc-reply> with no message-id, discarding.", session->id);
             lyxml_free(session->ctx, xml);
-            goto next_message;
+            return NC_MSG_ERROR;
         }
 
         cont_ptr = &session->replies;
@@ -499,12 +521,13 @@ next_message:
 
     /* we read notif, want a rpc-reply */
     if (msgid && (msgtype == NC_MSG_NOTIF)) {
-        if (!session->notif) {
+        /* TODO check whether the session is even subscribed */
+        /*if (!session->notif) {
             pthread_mutex_unlock(session->ti_lock);
             ERR("Session %u: received a <notification> but session is not subscribed.", session->id);
             lyxml_free(session->ctx, xml);
-            goto next_message;
-        }
+            return NC_MSG_ERROR;
+        }*/
 
         cont_ptr = &session->notifs;
         while (*cont_ptr) {
@@ -519,30 +542,26 @@ next_message:
 
     switch (msgtype) {
     case NC_MSG_NOTIF:
-        /* we want a rpc-reply */
-        if (msgid) {
-            goto next_message;
+        if (!msgid) {
+            *msg = xml;
         }
-        *msg = xml;
         break;
 
     case NC_MSG_REPLY:
-        /* we want a notif */
-        if (!msgid) {
-            goto next_message;
+        if (msgid) {
+            *msg = xml;
         }
-        *msg = xml;
         break;
 
     case NC_MSG_HELLO:
         ERR("Session %u: received another <hello> message.", session->id);
         lyxml_free(session->ctx, xml);
-        goto next_message;
+        return NC_MSG_ERROR;
 
     case NC_MSG_RPC:
         ERR("Session %u: received <rpc> from a NETCONF server.", session->id);
         lyxml_free(session->ctx, xml);
-        goto next_message;
+        return NC_MSG_ERROR;
 
     default:
         /* NC_MSG_WOULDBLOCK and NC_MSG_ERROR - pass it out;
@@ -822,6 +841,112 @@ parse_reply(struct ly_ctx *ctx, struct lyxml_elem *xml, struct nc_rpc *rpc)
     return reply;
 }
 
+#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+
+int
+nc_client_ch_add_bind_listen(const char *address, uint16_t port, NC_TRANSPORT_IMPL ti)
+{
+    int sock;
+
+    if (!address || !port) {
+        ERRARG;
+        return -1;
+    }
+
+    sock = nc_sock_listen(address, port);
+    if (sock == -1) {
+        return -1;
+    }
+
+    ++client_opts.ch_bind_count;
+    client_opts.ch_binds = realloc(client_opts.ch_binds, client_opts.ch_bind_count * sizeof *client_opts.ch_binds);
+
+    client_opts.ch_binds[client_opts.ch_bind_count - 1].address = strdup(address);
+    client_opts.ch_binds[client_opts.ch_bind_count - 1].port = port;
+    client_opts.ch_binds[client_opts.ch_bind_count - 1].sock = sock;
+    client_opts.ch_binds[client_opts.ch_bind_count - 1].ti = ti;
+
+    return 0;
+}
+
+int
+nc_client_ch_del_bind(const char *address, uint16_t port, NC_TRANSPORT_IMPL ti)
+{
+    uint32_t i;
+    int ret = -1;
+
+    if (!address && !port && !ti) {
+        for (i = 0; i < client_opts.ch_bind_count; ++i) {
+            close(client_opts.ch_binds[i].sock);
+            free((char *)client_opts.ch_binds[i].address);
+
+            ret = 0;
+        }
+        free(client_opts.ch_binds);
+        client_opts.ch_binds = NULL;
+        client_opts.ch_bind_count = 0;
+    } else {
+        for (i = 0; i < client_opts.ch_bind_count; ++i) {
+            if ((!address || !strcmp(client_opts.ch_binds[i].address, address))
+                    && (!port || (client_opts.ch_binds[i].port == port))
+                    && (!ti || (client_opts.ch_binds[i].ti == ti))) {
+                close(client_opts.ch_binds[i].sock);
+                free((char *)client_opts.ch_binds[i].address);
+
+                --client_opts.ch_bind_count;
+                memcpy(&client_opts.ch_binds[i], &client_opts.ch_binds[client_opts.ch_bind_count], sizeof *client_opts.ch_binds);
+
+                ret = 0;
+            }
+        }
+    }
+
+    return ret;
+}
+
+API int
+nc_accept_callhome(int timeout, struct ly_ctx *ctx, struct nc_session **session)
+{
+    int sock;
+    char *host = NULL;
+    uint16_t port, idx;
+
+    if (!client_opts.ch_binds || !session) {
+        ERRARG;
+        return -1;
+    }
+
+    sock = nc_sock_accept_binds(client_opts.ch_binds, client_opts.ch_bind_count, timeout, &host, &port, &idx);
+
+    if (sock < 1) {
+        return sock;
+    }
+
+#ifdef ENABLE_SSH
+    if (client_opts.ch_binds[idx].ti == NC_TI_LIBSSH) {
+        *session = nc_accept_callhome_ssh_sock(sock, host, port, ctx);
+    } else
+#endif
+#ifdef ENABLE_TLS
+    if (client_opts.ch_binds[idx].ti == NC_TI_OPENSSL) {
+        *session = nc_accept_callhome_tls_sock(sock, host, port, ctx);
+    } else
+#endif
+    {
+        *session = NULL;
+    }
+
+    free(host);
+
+    if (!(*session)) {
+        return -1;
+    }
+
+    return 1;
+}
+
+#endif /* ENABLE_SSH || ENABLE_TLS */
+
 API NC_MSG_TYPE
 nc_recv_reply(struct nc_session *session, struct nc_rpc *rpc, uint64_t msgid, int timeout, struct nc_reply **reply)
 {
@@ -838,9 +963,6 @@ nc_recv_reply(struct nc_session *session, struct nc_rpc *rpc, uint64_t msgid, in
     *reply = NULL;
 
     msgtype = get_msg(session, timeout, msgid, &xml);
-    if (msgtype == NC_MSG_WOULDBLOCK) {
-        return NC_MSG_WOULDBLOCK;
-    }
 
     if (msgtype == NC_MSG_REPLY) {
         *reply = parse_reply(session->ctx, xml, rpc);
@@ -906,6 +1028,74 @@ fail:
     lyxml_free(session->ctx, xml);
 
     return NC_MSG_ERROR;
+}
+
+static void *
+nc_recv_notif_thread(void *arg)
+{
+    struct nc_ntf_thread_arg *ntarg;
+    struct nc_session *session;
+    void (*notif_clb)(struct nc_session *session, const struct nc_notif *notif);
+    struct nc_notif *notif;
+    NC_MSG_TYPE msgtype;
+
+    ntarg = (struct nc_ntf_thread_arg *)arg;
+    session = ntarg->session;
+    notif_clb = ntarg->notif_clb;
+    free(ntarg);
+
+    while (session->ntf_tid) {
+        msgtype = nc_recv_notif(session, 0, &notif);
+        if (msgtype == NC_MSG_NOTIF) {
+            notif_clb(session, notif);
+            if (!strcmp(notif->tree->schema->name, "notificationComplete")
+                    && !strcmp(notif->tree->schema->module->name, "nc-notifications")) {
+                nc_notif_free(notif);
+                break;
+            }
+            nc_notif_free(notif);
+        }
+
+        usleep(NC_CLIENT_NOTIF_THREAD_SLEEP);
+    }
+
+    return NULL;
+}
+
+API int
+nc_recv_notif_dispatch(struct nc_session *session, void (*notif_clb)(struct nc_session *session, const struct nc_notif *notif))
+{
+    struct nc_ntf_thread_arg *ntarg;
+    int ret;
+
+    if (!session || !notif_clb) {
+        ERRARG;
+        return -1;
+    } else if ((session->status != NC_STATUS_RUNNING) || (session->side != NC_CLIENT)) {
+        ERR("Session %u: invalid session to receive Notifications.", session->id);
+        return -1;
+    } else if (session->ntf_tid) {
+        ERR("Session %u: separate notification thread is already running.", session->id);
+        return -1;
+    }
+
+    ntarg = malloc(sizeof *ntarg);
+    ntarg->session = session;
+    ntarg->notif_clb = notif_clb;
+
+    /* just so that nc_recv_notif_thread() does not immediately exit, the value does not matter */
+    session->ntf_tid = malloc(sizeof *session->ntf_tid);
+
+    ret = pthread_create((pthread_t *)session->ntf_tid, NULL, nc_recv_notif_thread, ntarg);
+    if (ret) {
+        ERR("Session %u: failed to create a new thread (%s).", strerror(errno));
+        free(ntarg);
+        free((pthread_t *)session->ntf_tid);
+        session->ntf_tid = NULL;
+        return -1;
+    }
+
+    return 0;
 }
 
 API NC_MSG_TYPE
@@ -1401,83 +1591,4 @@ nc_send_rpc(struct nc_session *session, struct nc_rpc *rpc, int timeout, uint64_
 
     *msgid = cur_msgid;
     return NC_MSG_RPC;
-}
-
-/* CALL HOME */
-
-int
-nc_sock_accept(uint16_t port, int timeout, char **peer_host, uint16_t *peer_port)
-{
-    struct pollfd reverse_listen_socket = {-1, POLLIN, 0};
-    int sock;
-    struct sockaddr_storage remote;
-    socklen_t addr_size = sizeof(remote);
-    int status;
-
-    reverse_listen_socket.fd = nc_sock_listen("::0", port);
-    if (reverse_listen_socket.fd == -1) {
-        goto fail;
-    }
-
-    reverse_listen_socket.revents = 0;
-    while (1) {
-        DBG("Waiting %ums for incoming Call Home connections.", timeout);
-        status = poll(&reverse_listen_socket, 1, timeout);
-
-        if (status == 0) {
-            /* timeout */
-            ERR("Timeout for Call Home listen expired.");
-            goto fail;
-        } else if ((status == -1) && (errno == EINTR)) {
-            /* poll was interrupted - try it again */
-            continue;
-        } else if (status < 0) {
-            /* poll failed - something wrong happened */
-            ERR("Call Home poll failed (%s).", strerror(errno));
-            goto fail;
-        } else if (status > 0) {
-            if (reverse_listen_socket.revents & (POLLHUP | POLLERR)) {
-                /* close pipe/fd - other side already did it */
-                ERR("Call Home listening socket was closed.");
-                goto fail;
-            } else if (reverse_listen_socket.revents & POLLIN) {
-                /* accept call home */
-                sock = accept(reverse_listen_socket.fd, (struct sockaddr *)&remote, &addr_size);
-                break;
-            }
-        }
-    }
-
-    /* we accepted a connection, that's it */
-    close(reverse_listen_socket.fd);
-
-    /* fill some server info, if interested */
-    if (remote.ss_family == AF_INET) {
-        struct sockaddr_in *remote_in = (struct sockaddr_in *)&remote;
-        if (peer_port) {
-            *peer_port = ntohs(remote_in->sin_port);
-        }
-        if (peer_host) {
-            *peer_host = malloc(INET6_ADDRSTRLEN);
-            inet_ntop(AF_INET, &(remote_in->sin_addr), *peer_host, INET6_ADDRSTRLEN);
-        }
-    } else if (remote.ss_family == AF_INET6) {
-        struct sockaddr_in6 *remote_in = (struct sockaddr_in6 *)&remote;
-        if (peer_port) {
-            *peer_port = ntohs(remote_in->sin6_port);
-        }
-        if (peer_host) {
-            *peer_host = malloc(INET6_ADDRSTRLEN);
-            inet_ntop(AF_INET6, &(remote_in->sin6_addr), *peer_host, INET6_ADDRSTRLEN);
-        }
-    }
-
-    return sock;
-
-fail:
-    if (reverse_listen_socket.fd != -1) {
-        close(reverse_listen_socket.fd);
-    }
-
-    return -1;
 }

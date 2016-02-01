@@ -22,6 +22,7 @@
 
 #include <errno.h>
 #include <stdlib.h>
+#include <string.h>
 #include <pthread.h>
 #include <time.h>
 #include <libyang/libyang.h>
@@ -176,6 +177,17 @@ nc_session_get_port(const struct nc_session *session)
     return session->port;
 }
 
+API struct ly_ctx *
+nc_session_get_ctx(const struct nc_session *session)
+{
+    if (!session) {
+        ERRARG;
+        return NULL;
+    }
+
+    return session->ctx;
+}
+
 API const char **
 nc_session_get_cpblts(const struct nc_session *session)
 {
@@ -233,6 +245,7 @@ nc_session_free(struct nc_session *session)
     int r, i;
     int connected; /* flag to indicate whether the transport socket is still connected */
     int multisession = 0; /* flag for more NETCONF sessions on a single SSH session */
+    pthread_t tid;
     struct nc_session *siter;
     struct nc_msg_cont *contiter;
     struct lyxml_elem *rpl, *child;
@@ -246,18 +259,20 @@ nc_session_free(struct nc_session *session)
 
     /* mark session for closing */
     if (session->ti_lock) {
-        do {
-            r = nc_timedlock(session->ti_lock, 0, NULL);
-        } while (!r);
+        r = nc_timedlock(session->ti_lock, -1, NULL);
         if (r == -1) {
             return;
         }
     }
 
     /* stop notifications loop if any */
-    if (session->notif) {
-        pthread_cancel(*session->notif);
-        pthread_join(*session->notif, NULL);
+    if (session->ntf_tid) {
+        tid = *session->ntf_tid;
+        free((pthread_t *)session->ntf_tid);
+        session->ntf_tid = NULL;
+        /* the thread now knows it should quit */
+
+        pthread_join(tid, NULL);
     }
 
     if ((session->side == NC_CLIENT) && (session->status == NC_STATUS_RUNNING)) {
@@ -331,6 +346,9 @@ nc_session_free(struct nc_session *session)
          * so it is up to the caller to close them correctly
          * TODO use callbacks
          */
+        /* just to avoid compiler warning */
+        (void)connected;
+        (void)siter;
         break;
 
 #ifdef ENABLE_SSH
@@ -488,28 +506,28 @@ create_cpblts(struct ly_ctx *ctx)
     mod = ly_ctx_get_module(ctx, "ietf-netconf", NULL);
     if (mod) {
         if (lys_features_state(mod, "writable-running") == 1) {
-            add_cpblt(ctx, "urn:ietf:params:netconf:writable-running:1.0", &cpblts, &size, &count);
+            add_cpblt(ctx, "urn:ietf:params:netconf:capability:writable-running:1.0", &cpblts, &size, &count);
         }
         if (lys_features_state(mod, "candidate") == 1) {
-            add_cpblt(ctx, "urn:ietf:params:netconf:candidate:1.0", &cpblts, &size, &count);
+            add_cpblt(ctx, "urn:ietf:params:netconf:capability:candidate:1.0", &cpblts, &size, &count);
             if (lys_features_state(mod, "confirmed-commit") == 1) {
-                add_cpblt(ctx, "urn:ietf:params:netconf:confirmed-commit:1.1", &cpblts, &size, &count);
+                add_cpblt(ctx, "urn:ietf:params:netconf:capability:confirmed-commit:1.1", &cpblts, &size, &count);
             }
         }
         if (lys_features_state(mod, "rollback-on-error") == 1) {
-            add_cpblt(ctx, "urn:ietf:params:netconf:rollback-on-error:1.0", &cpblts, &size, &count);
+            add_cpblt(ctx, "urn:ietf:params:netconf:capability:rollback-on-error:1.0", &cpblts, &size, &count);
         }
         if (lys_features_state(mod, "validate") == 1) {
-            add_cpblt(ctx, "urn:ietf:params:netconf:validate:1.1", &cpblts, &size, &count);
+            add_cpblt(ctx, "urn:ietf:params:netconf:capability:validate:1.1", &cpblts, &size, &count);
         }
         if (lys_features_state(mod, "startup") == 1) {
-            add_cpblt(ctx, "urn:ietf:params:netconf:startup:1.0", &cpblts, &size, &count);
+            add_cpblt(ctx, "urn:ietf:params:netconf:capability:startup:1.0", &cpblts, &size, &count);
         }
         if (lys_features_state(mod, "url") == 1) {
-            add_cpblt(ctx, "urn:ietf:params:netconf:url:1.0", &cpblts, &size, &count);
+            add_cpblt(ctx, "urn:ietf:params:netconf:capability:url:1.0", &cpblts, &size, &count);
         }
         if (lys_features_state(mod, "xpath") == 1) {
-            add_cpblt(ctx, "urn:ietf:params:netconf:xpath:1.0", &cpblts, &size, &count);
+            add_cpblt(ctx, "urn:ietf:params:netconf:capability:xpath:1.0", &cpblts, &size, &count);
         }
     }
 
@@ -518,7 +536,7 @@ create_cpblts(struct ly_ctx *ctx)
         if (!server_opts.wd_basic_mode) {
             VRB("with-defaults capability will not be advertised even though \"ietf-netconf-with-defaults\" model is present, unknown basic-mode.");
         } else {
-            strcpy(str, "urn:ietf:params:netconf:with-defaults:1.0");
+            strcpy(str, "urn:ietf:params:netconf:capability:with-defaults:1.0");
             switch (server_opts.wd_basic_mode) {
             case NC_WD_ALL:
                 strcat(str, "?basic-mode=report-all");
@@ -557,9 +575,9 @@ create_cpblts(struct ly_ctx *ctx)
 
     mod = ly_ctx_get_module(ctx, "nc-notifications", NULL);
     if (mod) {
-        add_cpblt(ctx, "urn:ietf:params:netconf:notification:1.0", &cpblts, &size, &count);
+        add_cpblt(ctx, "urn:ietf:params:netconf:capability:notification:1.0", &cpblts, &size, &count);
         if (server_opts.interleave_capab) {
-            add_cpblt(ctx, "urn:ietf:params:netconf:interleave:1.0", &cpblts, &size, &count);
+            add_cpblt(ctx, "urn:ietf:params:netconf:capability:interleave:1.0", &cpblts, &size, &count);
         }
     }
 
@@ -907,6 +925,10 @@ nc_ssh_destroy(void)
 
 static pthread_mutex_t *tls_locks;
 
+struct CRYPTO_dynlock_value {
+    pthread_mutex_t lock;
+};
+
 static void
 tls_thread_locking_func(int mode, int n, const char *UNUSED(file), int UNUSED(line))
 {
@@ -917,10 +939,44 @@ tls_thread_locking_func(int mode, int n, const char *UNUSED(file), int UNUSED(li
     }
 }
 
-static unsigned long
-tls_thread_id_func(void)
+static void
+tls_thread_id_func(CRYPTO_THREADID *tid)
 {
-    return (unsigned long)pthread_self();
+    CRYPTO_THREADID_set_numeric(tid, (unsigned long)pthread_self());
+}
+
+static struct CRYPTO_dynlock_value *
+tls_dyn_create_func(const char *UNUSED(file), int UNUSED(line))
+{
+    struct CRYPTO_dynlock_value *value;
+
+    value = malloc(sizeof *value);
+    if (!value) {
+        ERRMEM;
+        return NULL;
+    }
+    pthread_mutex_init(&value->lock, NULL);
+
+    return value;
+}
+
+static void
+tls_dyn_lock_func(int mode, struct CRYPTO_dynlock_value *l, const char *UNUSED(file), int UNUSED(line))
+{
+    /* mode can also be CRYPTO_READ or CRYPTO_WRITE, but all the examples
+     * I found ignored this fact, what do I know... */
+    if (mode & CRYPTO_LOCK) {
+        pthread_mutex_lock(&l->lock);
+    } else {
+        pthread_mutex_unlock(&l->lock);
+    }
+}
+
+static void
+tls_dyn_destroy_func(struct CRYPTO_dynlock_value *l, const char *UNUSED(file), int UNUSED(line))
+{
+    pthread_mutex_destroy(&l->lock);
+    free(l);
 }
 
 API void
@@ -937,15 +993,18 @@ nc_tls_init(void)
         pthread_mutex_init(tls_locks + i, NULL);
     }
 
-    CRYPTO_set_id_callback(tls_thread_id_func);
+    CRYPTO_THREADID_set_callback(tls_thread_id_func);
     CRYPTO_set_locking_callback(tls_thread_locking_func);
+
+    CRYPTO_set_dynlock_create_callback(tls_dyn_create_func);
+    CRYPTO_set_dynlock_lock_callback(tls_dyn_lock_func);
+    CRYPTO_set_dynlock_destroy_callback(tls_dyn_destroy_func);
 }
 
 API void
 nc_tls_destroy(void)
 {
     int i;
-
     CRYPTO_THREADID crypto_tid;
 
     EVP_cleanup();
@@ -961,6 +1020,10 @@ nc_tls_destroy(void)
         pthread_mutex_destroy(tls_locks + i);
     }
     free(tls_locks);
+
+    CRYPTO_set_dynlock_create_callback(NULL);
+    CRYPTO_set_dynlock_lock_callback(NULL);
+    CRYPTO_set_dynlock_destroy_callback(NULL);
 }
 
 #endif /* ENABLE_TLS */

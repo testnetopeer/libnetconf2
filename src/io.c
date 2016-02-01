@@ -25,6 +25,7 @@
 #include <assert.h>
 #include <errno.h>
 #include <poll.h>
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
@@ -922,7 +923,7 @@ nc_write_msg(struct nc_session *session, NC_MSG_TYPE type, ...)
         case NC_RPL_DATA:
             nc_write_clb((void *)&arg, "<data>", 6);
             lyd_print_clb(nc_write_clb, (void *)&arg, ((struct nc_reply_data *)reply)->data, LYD_XML, 0);
-            nc_write_clb((void *)&arg, "<data/>", 7);
+            nc_write_clb((void *)&arg, "</data>", 7);
             break;
         case NC_RPL_ERROR:
             error_rpl = (struct nc_server_reply_error *)reply;
