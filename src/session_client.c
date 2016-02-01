@@ -492,7 +492,7 @@ get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_el
 
             ERR("Session %u: discarding a <rpc-reply> with an unexpected message-id \"%s\".", str_msgid);
             lyxml_free(session->ctx, cont->msg);
-            free(msg);
+            free(cont);
         }
     }
 
@@ -918,7 +918,7 @@ nc_accept_callhome(int timeout, struct ly_ctx *ctx, struct nc_session **session)
 
     sock = nc_sock_accept_binds(client_opts.ch_binds, client_opts.ch_bind_count, timeout, &host, &port, &idx);
 
-    if (sock < 1) {
+    if (sock < 0) {
         return sock;
     }
 
@@ -933,6 +933,7 @@ nc_accept_callhome(int timeout, struct ly_ctx *ctx, struct nc_session **session)
     } else
 #endif
     {
+        close(sock);
         *session = NULL;
     }
 
