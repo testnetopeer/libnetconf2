@@ -182,10 +182,11 @@ int nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session);
  * @param[in] timeout Poll timeout in milliseconds. 0 for non-blocking call, -1 for
  *                    infinite waiting.
  * @return 0 on elapsed timeout,
- *         1 if an RPC was processed,
+ *         1 if an RPC was processed (even if it was not known - it failed to be
+ *           parsed into session ctx),
  *         2 if an RPC was processed and there are unhandled events on other sessions,
  *         3 if a session from \p ps changed its status (was invalidated),
- *         -1 on error.
+ *         -1 on error (a session likely changed its status as well).
  *
  *         Only with SSH support:
  *         4 if an SSH message was processed,

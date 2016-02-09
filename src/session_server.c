@@ -82,7 +82,7 @@ nc_server_endpt_unlock(struct nc_endpt *endpt)
     pthread_mutex_unlock(&endpt->endpt_lock);
 
     /* READ UNLOCK */
-    pthread_rwlock_rdlock(&server_opts.endpt_array_lock);
+    pthread_rwlock_unlock(&server_opts.endpt_array_lock);
 }
 
 API void
@@ -531,8 +531,15 @@ nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session)
     for (i = 0; i < ps->session_count; ++i) {
         if (ps->sessions[i] == session) {
             --ps->session_count;
-            ps->sessions[i] = ps->sessions[ps->session_count];
-            memcpy(&ps->pfds[i], &ps->pfds[ps->session_count], sizeof *ps->pfds);
+            if (i < ps->session_count) {
+                ps->sessions[i] = ps->sessions[ps->session_count];
+                memcpy(&ps->pfds[i], &ps->pfds[ps->session_count], sizeof *ps->pfds);
+            } else if (!ps->session_count) {
+                free(ps->sessions);
+                ps->sessions = NULL;
+                free(ps->pfds);
+                ps->pfds = NULL;
+            }
             return 0;
         }
     }
@@ -560,19 +567,25 @@ nc_recv_rpc(struct nc_session *session, struct nc_server_rpc **rpc)
     switch (msgtype) {
     case NC_MSG_RPC:
         *rpc = malloc(sizeof **rpc);
+
         nc_ctx_lock(-1, NULL);
         (*rpc)->tree = lyd_parse_xml(server_opts.ctx, &xml->child, LYD_OPT_DESTRUCT | LYD_OPT_RPC);
         nc_ctx_unlock();
+
+        if (!(*rpc)->tree) {
+            ERR("Session %u: received message failed to be parsed into a known RPC.", session->id);
+            msgtype = NC_MSG_NONE;
+        }
         (*rpc)->root = xml;
         break;
     case NC_MSG_HELLO:
         ERR("Session %u: received another <hello> message.", session->id);
         goto error;
     case NC_MSG_REPLY:
-        ERR("Session %u: received <rpc-reply> from NETCONF client.", session->id);
+        ERR("Session %u: received <rpc-reply> from a NETCONF client.", session->id);
         goto error;
     case NC_MSG_NOTIF:
-        ERR("Session %u: received <notification> from NETCONF client.", session->id);
+        ERR("Session %u: received <notification> from a NETCONF client.", session->id);
         goto error;
     default:
         /* NC_MSG_ERROR - pass it out;
@@ -599,7 +612,7 @@ nc_send_reply(struct nc_session *session, struct nc_server_rpc *rpc)
     int ret;
 
     /* no callback, reply with a not-implemented error */
-    if (!rpc->tree->schema->private) {
+    if (!rpc->tree || !rpc->tree->schema->private) {
         reply = nc_server_reply_err(nc_err(NC_ERR_OP_NOT_SUPPORTED, NC_ERR_TYPE_PROT));
     } else {
         clb = (nc_rpc_clb)rpc->tree->schema->private;
@@ -719,20 +732,17 @@ retry_poll:
                     ps->pfds[i].revents = 0;
                     if (i == ps->session_count - 1) {
                         /* last session and it is not the right channel, ... */
-                        if (timeout > 0) {
-                            /* ... decrease timeout, wait it all out and try again, last time */
-                            nc_subtract_elapsed(&timeout, &old_ts);
-                            usleep(timeout * 1000);
-                            timeout = 0;
-                            goto retry_poll;
-                        } else if (!timeout) {
+                        if (!timeout) {
                             /* ... timeout is 0, so that is it */
                             return 0;
-                        } else {
-                            /* ... retry polling reasonable time apart */
-                            usleep(NC_TIMEOUT_STEP);
-                            goto retry_poll;
                         }
+                        /* ... retry polling reasonable time apart ... */
+                        usleep(NC_TIMEOUT_STEP);
+                        if (timeout > 0) {
+                            /* ... and decrease timeout, if not -1 */
+                            nc_subtract_elapsed(&timeout, &old_ts);
+                        }
+                        goto retry_poll;
                     }
                     /* check other sessions */
                     continue;
@@ -774,17 +784,21 @@ retry_poll:
         return -1;
     }
 
+    /* NC_MSG_NONE is not a real (known) RPC */
+    if (msgtype == NC_MSG_RPC) {
+        session->last_rpc = time(NULL);
+    }
+
     /* process RPC */
-    session->last_rpc = time(NULL);
     msgtype = nc_send_reply(session, rpc);
 
     pthread_mutex_unlock(session->ti_lock);
 
     if (msgtype == NC_MSG_ERROR) {
-        nc_server_rpc_free(rpc);
+        nc_server_rpc_free(rpc, server_opts.ctx);
         return -1;
     }
-    nc_server_rpc_free(rpc);
+    nc_server_rpc_free(rpc, server_opts.ctx);
 
     /* status change takes precedence over leftover events (return 2) */
     if (session->status != NC_STATUS_RUNNING) {
@@ -852,35 +866,34 @@ nc_server_add_endpt_listen(const char *name, const char *address, uint16_t port,
 {
     int sock;
     uint16_t i;
+#ifdef ENABLE_SSH
+    struct nc_server_ssh_opts *ssh_opts;
+#endif
 
     if (!name || !address || !port) {
         ERRARG;
         return -1;
     }
 
-    /* READ LOCK */
-    pthread_rwlock_rdlock(&server_opts.endpt_array_lock);
+    /* WRITE LOCK */
+    pthread_rwlock_wrlock(&server_opts.endpt_array_lock);
 
     /* check name uniqueness */
     for (i = 0; i < server_opts.endpt_count; ++i) {
-        if (!strcmp(server_opts.endpts[i].name, name)) {
+        if ((server_opts.binds[i].ti == ti) && !strcmp(server_opts.endpts[i].name, name)) {
             ERR("Endpoint \"%s\" already exists.", name);
-            /* READ UNLOCK */
+            /* WRITE UNLOCK */
             pthread_rwlock_unlock(&server_opts.endpt_array_lock);
             return -1;
         }
     }
 
-    /* READ UNLOCK */
-    pthread_rwlock_unlock(&server_opts.endpt_array_lock);
-
     sock = nc_sock_listen(address, port);
     if (sock == -1) {
+        /* WRITE UNLOCK */
+        pthread_rwlock_unlock(&server_opts.endpt_array_lock);
         return -1;
     }
-
-    /* WRITE LOCK */
-    pthread_rwlock_wrlock(&server_opts.endpt_array_lock);
 
     ++server_opts.endpt_count;
     server_opts.binds = realloc(server_opts.binds, server_opts.endpt_count * sizeof *server_opts.binds);
@@ -896,7 +909,13 @@ nc_server_add_endpt_listen(const char *name, const char *address, uint16_t port,
     switch (ti) {
 #ifdef ENABLE_SSH
     case NC_TI_LIBSSH:
-        server_opts.endpts[server_opts.endpt_count - 1].ti_opts = calloc(1, sizeof(struct nc_server_ssh_opts));
+        ssh_opts = calloc(1, sizeof *ssh_opts);
+        /* set default values */
+        ssh_opts->auth_methods = NC_SSH_AUTH_PUBLICKEY | NC_SSH_AUTH_PASSWORD | NC_SSH_AUTH_INTERACTIVE;
+        ssh_opts->auth_attempts = 3;
+        ssh_opts->auth_timeout = 10;
+
+        server_opts.endpts[server_opts.endpt_count - 1].ti_opts = ssh_opts;
         break;
 #endif
 #ifdef ENABLE_TLS
@@ -930,6 +949,7 @@ nc_server_endpt_set_address_port(const char *endpt_name, const char *address, ui
         return -1;
     }
 
+    /* LOCK */
     endpt = nc_server_endpt_lock(endpt_name, ti);
     if (!endpt) {
         return -1;
@@ -943,7 +963,7 @@ nc_server_endpt_set_address_port(const char *endpt_name, const char *address, ui
     }
     if (!bind) {
         ERRINT;
-        return -1;
+        goto fail;
     }
 
     if (address) {
@@ -952,7 +972,7 @@ nc_server_endpt_set_address_port(const char *endpt_name, const char *address, ui
         sock = nc_sock_listen(bind->address, port);
     }
     if (sock == -1) {
-        return -1;
+        goto fail;
     }
 
     /* close old socket, update parameters */
@@ -965,7 +985,14 @@ nc_server_endpt_set_address_port(const char *endpt_name, const char *address, ui
         bind->port = port;
     }
 
+    /* UNLOCK */
+    nc_server_endpt_unlock(endpt);
     return 0;
+
+fail:
+    /* UNLOCK */
+    nc_server_endpt_unlock(endpt);
+    return -1;
 }
 
 int
@@ -979,10 +1006,12 @@ nc_server_del_endpt(const char *name, NC_TRANSPORT_IMPL ti)
 
     if (!name && !ti) {
         /* remove all */
-        nc_ctx_lock(-1, NULL);
         for (i = 0; i < server_opts.endpt_count; ++i) {
+            nc_ctx_lock(-1, NULL);
             lydict_remove(server_opts.ctx, server_opts.endpts[i].name);
             lydict_remove(server_opts.ctx, server_opts.binds[i].address);
+            nc_ctx_unlock();
+
             close(server_opts.binds[i].sock);
             pthread_mutex_destroy(&server_opts.endpts[i].endpt_lock);
             switch (server_opts.binds[i].ti) {
@@ -1004,7 +1033,8 @@ nc_server_del_endpt(const char *name, NC_TRANSPORT_IMPL ti)
 
             ret = 0;
         }
-        nc_ctx_unlock();
+        free(server_opts.binds);
+        server_opts.binds = NULL;
         free(server_opts.endpts);
         server_opts.endpts = NULL;
         server_opts.endpt_count = 0;
@@ -1019,6 +1049,7 @@ nc_server_del_endpt(const char *name, NC_TRANSPORT_IMPL ti)
                 lydict_remove(server_opts.ctx, server_opts.endpts[i].name);
                 lydict_remove(server_opts.ctx, server_opts.binds[i].address);
                 nc_ctx_unlock();
+
                 close(server_opts.binds[i].sock);
                 pthread_mutex_destroy(&server_opts.endpts[i].endpt_lock);
                 switch (server_opts.binds[i].ti) {
@@ -1039,8 +1070,15 @@ nc_server_del_endpt(const char *name, NC_TRANSPORT_IMPL ti)
                 free(server_opts.endpts[i].ti_opts);
 
                 --server_opts.endpt_count;
-                memcpy(&server_opts.binds[i], &server_opts.binds[server_opts.endpt_count], sizeof *server_opts.binds);
-                memcpy(&server_opts.endpts[i], &server_opts.endpts[server_opts.endpt_count], sizeof *server_opts.endpts);
+                if (i < server_opts.endpt_count) {
+                    memcpy(&server_opts.binds[i], &server_opts.binds[server_opts.endpt_count], sizeof *server_opts.binds);
+                    memcpy(&server_opts.endpts[i], &server_opts.endpts[server_opts.endpt_count], sizeof *server_opts.endpts);
+                } else if (!server_opts.endpt_count) {
+                    free(server_opts.binds);
+                    server_opts.binds = NULL;
+                    free(server_opts.endpts);
+                    server_opts.endpts = NULL;
+                }
 
                 ret = 0;
 
@@ -1065,25 +1103,31 @@ nc_accept(int timeout, struct nc_session **session)
     char *host = NULL;
     uint16_t port, idx;
 
-    if (!server_opts.ctx || !server_opts.endpt_count || !session) {
+    if (!server_opts.ctx || !session) {
         ERRARG;
         return -1;
     }
 
-    /* READ LOCK */
-    pthread_rwlock_rdlock(&server_opts.endpt_array_lock);
+    /* we have to hold WRITE for the whole time, since there is not
+     * a way of downgrading the lock to READ */
+    /* WRITE LOCK */
+    pthread_rwlock_wrlock(&server_opts.endpt_array_lock);
+
+    if (!server_opts.endpt_count) {
+        ERRARG;
+        /* WRITE UNLOCK */
+        pthread_rwlock_unlock(&server_opts.endpt_array_lock);
+        return -1;
+    }
 
     ret = nc_sock_accept_binds(server_opts.binds, server_opts.endpt_count, timeout, &host, &port, &idx);
 
-    if (ret < 0) {
-        /* READ UNLOCK */
+    if (ret < 1) {
+        /* WRITE UNLOCK */
         pthread_rwlock_unlock(&server_opts.endpt_array_lock);
         return ret;
     }
     sock = ret;
-
-    /* ENDPT LOCK */
-    pthread_mutex_lock(&server_opts.endpts[idx].endpt_lock);
 
     *session = calloc(1, sizeof **session);
     if (!(*session)) {
@@ -1138,10 +1182,7 @@ nc_accept(int timeout, struct nc_session **session)
         goto fail;
     }
 
-    /* ENDPT UNLOCK */
-    pthread_mutex_lock(&server_opts.endpts[idx].endpt_lock);
-
-    /* READ UNLOCK */
+    /* WRITE UNLOCK */
     pthread_rwlock_unlock(&server_opts.endpt_array_lock);
 
     /* assign new SID atomically */
@@ -1162,8 +1203,6 @@ nc_accept(int timeout, struct nc_session **session)
     return 1;
 
 fail:
-    /* ENDPT UNLOCK */
-    pthread_mutex_unlock(&server_opts.endpts[idx].endpt_lock);
     /* WRITE UNLOCK */
     pthread_rwlock_unlock(&server_opts.endpt_array_lock);
 

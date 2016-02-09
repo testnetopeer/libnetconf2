@@ -78,7 +78,7 @@ nc_server_ssh_set_hostkey(const char *privkey_path, struct nc_server_ssh_opts *o
         opts->sshbind = ssh_bind_new();
         if (!opts->sshbind) {
             ERR("Failed to create a new ssh_bind.");
-            goto fail;
+            return -1;
         }
     }
 
@@ -88,11 +88,10 @@ nc_server_ssh_set_hostkey(const char *privkey_path, struct nc_server_ssh_opts *o
         } else {
             ERR("Failed to set host key (%s).", ssh_get_error(opts->sshbind));
         }
-        goto fail;
+        return -1;
     }
 
-fail:
-    return -1;
+    return 0;
 }
 
 API int
@@ -101,11 +100,13 @@ nc_server_ssh_endpt_set_hostkey(const char *endpt_name, const char *privkey_path
     int ret;
     struct nc_endpt *endpt;
 
+    /* LOCK */
     endpt = nc_server_endpt_lock(endpt_name, NC_TI_LIBSSH);
     if (!endpt) {
         return -1;
     }
     ret = nc_server_ssh_set_hostkey(privkey_path, endpt->ti_opts);
+    /* UNLOCK */
     nc_server_endpt_unlock(endpt);
 
     return ret;
@@ -137,16 +138,13 @@ nc_server_ssh_set_banner(const char *banner, struct nc_server_ssh_opts *opts)
         opts->sshbind = ssh_bind_new();
         if (!opts->sshbind) {
             ERR("Failed to create a new ssh_bind.");
-            goto fail;
+            return -1;
         }
     }
 
     ssh_bind_options_set(opts->sshbind, SSH_BIND_OPTIONS_BANNER, banner);
 
     return 0;
-
-fail:
-    return -1;
 }
 
 API int
@@ -155,11 +153,13 @@ nc_server_ssh_endpt_set_banner(const char *endpt_name, const char *banner)
     int ret;
     struct nc_endpt *endpt;
 
+    /* LOCK */
     endpt = nc_server_endpt_lock(endpt_name, NC_TI_LIBSSH);
     if (!endpt) {
         return -1;
     }
     ret = nc_server_ssh_set_banner(banner, endpt->ti_opts);
+    /* UNLOCK */
     nc_server_endpt_unlock(endpt);
 
     return ret;
@@ -198,11 +198,13 @@ nc_server_ssh_endpt_set_auth_methods(const char *endpt_name, int auth_methods)
     int ret;
     struct nc_endpt *endpt;
 
+    /* LOCK */
     endpt = nc_server_endpt_lock(endpt_name, NC_TI_LIBSSH);
     if (!endpt) {
         return -1;
     }
     ret = nc_server_ssh_set_auth_methods(auth_methods, endpt->ti_opts);
+    /* UNLOCK */
     nc_server_endpt_unlock(endpt);
 
     return ret;
@@ -240,11 +242,13 @@ nc_server_ssh_endpt_set_auth_attempts(const char *endpt_name, uint16_t auth_atte
     int ret;
     struct nc_endpt *endpt;
 
+    /* LOCK */
     endpt = nc_server_endpt_lock(endpt_name, NC_TI_LIBSSH);
     if (!endpt) {
         return -1;
     }
     ret = nc_server_ssh_set_auth_attempts(auth_attempts, endpt->ti_opts);
+    /* UNLOCK */
     nc_server_endpt_unlock(endpt);
 
     return ret;
@@ -282,11 +286,13 @@ nc_server_ssh_endpt_set_auth_timeout(const char *endpt_name, uint16_t auth_timeo
     int ret;
     struct nc_endpt *endpt;
 
+    /* LOCK */
     endpt = nc_server_endpt_lock(endpt_name, NC_TI_LIBSSH);
     if (!endpt) {
         return -1;
     }
     ret = nc_server_ssh_set_auth_timeout(auth_timeout, endpt->ti_opts);
+    /* UNLOCK */
     nc_server_endpt_unlock(endpt);
 
     return ret;
@@ -331,11 +337,13 @@ nc_server_ssh_endpt_add_authkey(const char *endpt_name, const char *pubkey_path,
     int ret;
     struct nc_endpt *endpt;
 
+    /* LOCK */
     endpt = nc_server_endpt_lock(endpt_name, NC_TI_LIBSSH);
     if (!endpt) {
         return -1;
     }
     ret = nc_server_ssh_add_authkey(pubkey_path, username, endpt->ti_opts);
+    /* UNLOCK */
     nc_server_endpt_unlock(endpt);
 
     return ret;
@@ -383,7 +391,12 @@ nc_server_ssh_del_authkey(const char *pubkey_path, const char *username, struct 
                 nc_ctx_unlock();
 
                 --opts->authkey_count;
-                memcpy(&opts->authkeys[i], &opts->authkeys[opts->authkey_count], sizeof *opts->authkeys);
+                if (i < opts->authkey_count) {
+                    memcpy(&opts->authkeys[i], &opts->authkeys[opts->authkey_count], sizeof *opts->authkeys);
+                } else if (!opts->authkey_count) {
+                    free(opts->authkeys);
+                    opts->authkeys = NULL;
+                }
 
                 ret = 0;
             }
@@ -399,11 +412,13 @@ nc_server_ssh_endpt_del_authkey(const char *endpt_name, const char *pubkey_path,
     int ret;
     struct nc_endpt *endpt;
 
+    /* LOCK */
     endpt = nc_server_endpt_lock(endpt_name, NC_TI_LIBSSH);
     if (!endpt) {
         return -1;
     }
     ret = nc_server_ssh_del_authkey(pubkey_path, username, endpt->ti_opts);
+    /* UNLOCK */
     nc_server_endpt_unlock(endpt);
 
     return ret;
@@ -573,7 +588,7 @@ auth_pubkey_compare_key(struct nc_server_ssh_opts *opts, ssh_key key)
             if (eaccess(opts->authkeys[i].path, R_OK)) {
                 WRN("Failed to import the public key \"%s\" (%s).", opts->authkeys[i].path, strerror(errno));
             } else {
-                WRN("Failed to import the public key \"%s\" (%s).", __func__, opts->authkeys[i].path, ssh_get_error(pub_key));
+                WRN("Failed to import the public key \"%s\" (%s).", opts->authkeys[i].path, ssh_get_error(pub_key));
             }
             continue;
         }
@@ -826,6 +841,14 @@ nc_sshcb_msg(ssh_session UNUSED(sshsession), ssh_message msg, void *data)
     }
 
     VRB("Received an SSH message \"%s\" of subtype \"%s\".", str_type, str_subtype);
+    if ((session->status == NC_STATUS_CLOSING) || (session->status == NC_STATUS_INVALID)) {
+        /* "valid" situation if, for example, receiving some auth or channel request timeouted,
+         * but we got it now, during session free */
+        VRB("SSH message arrived on a %s session, the request will be denied.",
+            (session->status == NC_STATUS_CLOSING ? "closing" : "invalid"));
+        ssh_message_reply_default(msg);
+        return 0;
+    }
     session->flags |= NC_SESSION_SSH_NEW_MSG;
 
     /*
@@ -901,7 +924,7 @@ nc_sshcb_msg(ssh_session UNUSED(sshsession), ssh_message msg, void *data)
 static int
 nc_open_netconf_channel(struct nc_session *session, int timeout)
 {
-    int elapsed = 0, ret;
+    int elapsed_usec = 0, ret, elapsed;
 
     /* message callback is executed twice to give chance for the channel to be
      * created if timeout == 0 (it takes 2 messages, channel-open, subsystem-request) */
@@ -953,10 +976,12 @@ nc_open_netconf_channel(struct nc_session *session, int timeout)
             return -1;
         }
 
+        elapsed = 0;
         ret = nc_timedlock(session->ti_lock, timeout, &elapsed);
         if (ret != 1) {
             return ret;
         }
+        elapsed_usec += elapsed * 1000;
 
         ret = ssh_execute_message_callbacks(session->ti.libssh.session);
         if (ret != SSH_OK) {
@@ -972,13 +997,13 @@ nc_open_netconf_channel(struct nc_session *session, int timeout)
             return 1;
         }
 
-        if ((timeout != -1) && (timeout >= elapsed)) {
+        if ((timeout != -1) && (elapsed_usec / 1000 >= timeout)) {
             /* timeout */
             break;
         }
 
         usleep(NC_TIMEOUT_STEP);
-        elapsed += NC_TIMEOUT_STEP;
+        elapsed_usec += NC_TIMEOUT_STEP;
     }
 
     return 0;
@@ -1061,7 +1086,7 @@ int
 nc_accept_ssh_session(struct nc_session *session, int sock, int timeout)
 {
     struct nc_server_ssh_opts *opts;
-    int libssh_auth_methods = 0, elapsed = 0, ret;
+    int libssh_auth_methods = 0, elapsed_usec = 0, ret;
 
     opts = session->ti_opts;
 
@@ -1118,8 +1143,8 @@ nc_accept_ssh_session(struct nc_session *session, int sock, int timeout)
         }
 
         usleep(NC_TIMEOUT_STEP);
-        elapsed += NC_TIMEOUT_STEP;
-    } while ((timeout == -1) || (timeout && (elapsed < timeout)));
+        elapsed_usec += NC_TIMEOUT_STEP;
+    } while ((timeout == -1) || (timeout && (elapsed_usec / 1000 < timeout)));
 
     if (!(session->flags & NC_SESSION_SSH_AUTHENTICATED)) {
         /* timeout */
@@ -1127,7 +1152,7 @@ nc_accept_ssh_session(struct nc_session *session, int sock, int timeout)
     }
 
     if (timeout > 0) {
-        timeout -= elapsed;
+        timeout -= elapsed_usec / 1000;
     }
 
     /* open channel */
