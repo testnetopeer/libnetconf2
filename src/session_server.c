@@ -304,14 +304,9 @@ nc_clb_default_get_schema(struct lyd_node *rpc, struct nc_session *UNUSED(sessio
         return nc_server_reply_err(err);
     }
 
-    module = ly_ctx_get_module(server_opts.ctx, "ietf-netconf-monitoring", NULL);
-    if (module) {
-        sdata = lys_get_node(module, "/get-schema/output/data");
-    }
+    sdata = ly_ctx_get_node(server_opts.ctx, "/ietf-netconf-monitoring:get-schema/output/data");
     if (model_data && sdata) {
-        nc_ctx_lock(-1, NULL);
         data = lyd_output_new_anyxml(sdata, model_data);
-        nc_ctx_unlock();
     }
     free(model_data);
     if (!data) {
@@ -333,7 +328,6 @@ API int
 nc_server_init(struct ly_ctx *ctx)
 {
     const struct lys_node *rpc;
-    const struct lys_module *mod;
 
     if (!ctx) {
         ERRARG;
@@ -341,21 +335,13 @@ nc_server_init(struct ly_ctx *ctx)
     }
 
     /* set default <get-schema> callback if not specified */
-    rpc = NULL;
-    mod = ly_ctx_get_module(ctx, "ietf-netconf-monitoring", NULL);
-    if (mod) {
-        rpc = lys_get_node(mod, "/get-schema");
-    }
+    rpc = ly_ctx_get_node(ctx, "/ietf-netconf-monitoring:get-schema");
     if (rpc && !rpc->private) {
         lys_set_private(rpc, nc_clb_default_get_schema);
     }
 
     /* set default <close-session> callback if not specififed */
-    rpc = NULL;
-    mod = ly_ctx_get_module(ctx, "ietf-netconf", NULL);
-    if (mod) {
-        rpc = lys_get_node(mod, "/close-session");
-    }
+    rpc = ly_ctx_get_node(ctx, "/ietf-netconf:close-session");
     if (rpc && !rpc->private) {
         lys_set_private(rpc, nc_clb_default_close_session);
     }
@@ -373,7 +359,7 @@ nc_server_destroy(void)
 {
     pthread_spin_destroy(&server_opts.sid_lock);
 
-#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
     nc_server_del_endpt(NULL, 0);
 #endif
 }
@@ -495,13 +481,13 @@ nc_ps_add_session(struct nc_pollsession *ps, struct nc_session *session)
         ps->pfds[ps->session_count - 1].fd = session->ti.fd.in;
         break;
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     case NC_TI_LIBSSH:
         ps->pfds[ps->session_count - 1].fd = ssh_get_fd(session->ti.libssh.session);
         break;
 #endif
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
     case NC_TI_OPENSSL:
         ps->pfds[ps->session_count - 1].fd = SSL_get_rfd(session->ti.tls);
         break;
@@ -568,10 +554,7 @@ nc_recv_rpc(struct nc_session *session, struct nc_server_rpc **rpc)
     case NC_MSG_RPC:
         *rpc = malloc(sizeof **rpc);
 
-        nc_ctx_lock(-1, NULL);
         (*rpc)->tree = lyd_parse_xml(server_opts.ctx, &xml->child, LYD_OPT_DESTRUCT | LYD_OPT_RPC);
-        nc_ctx_unlock();
-
         if (!(*rpc)->tree) {
             ERR("Session %u: received message failed to be parsed into a known RPC.", session->id);
             msgtype = NC_MSG_NONE;
@@ -682,7 +665,7 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout)
     }
 
     if (i == ps->session_count) {
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
 retry_poll:
 #endif
         /* no leftover event */
@@ -706,7 +689,7 @@ retry_poll:
             ps->sessions[i]->term_reason = NC_SESSION_TERM_OTHER;
             return 3;
         } else if (ps->pfds[i].revents & POLLIN) {
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
             if (ps->sessions[i]->ti_type == NC_TI_LIBSSH) {
                 uint16_t j;
 
@@ -748,7 +731,7 @@ retry_poll:
                     continue;
                 }
             }
-#endif /* ENABLE_SSH */
+#endif /* NC_ENABLED_SSH */
 
             /* we are going to process it now */
             ps->pfds[i].revents = 0;
@@ -838,35 +821,14 @@ nc_ps_clear(struct nc_pollsession *ps)
     }
 }
 
-API int
-nc_ctx_lock(int timeout, int *elapsed)
-{
-    return nc_timedlock(&server_opts.ctx_lock, timeout, elapsed);
-}
-
-API int
-nc_ctx_unlock(void)
-{
-    int ret;
-
-    ret = pthread_mutex_unlock(&server_opts.ctx_lock);
-
-    if (ret) {
-        ERR("Mutex unlock failed (%s).", strerror(ret));
-        return -1;
-    }
-
-    return 0;
-}
-
-#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
 
 int
 nc_server_add_endpt_listen(const char *name, const char *address, uint16_t port, NC_TRANSPORT_IMPL ti)
 {
     int sock;
     uint16_t i;
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     struct nc_server_ssh_opts *ssh_opts;
 #endif
 
@@ -899,15 +861,13 @@ nc_server_add_endpt_listen(const char *name, const char *address, uint16_t port,
     server_opts.binds = realloc(server_opts.binds, server_opts.endpt_count * sizeof *server_opts.binds);
     server_opts.endpts = realloc(server_opts.endpts, server_opts.endpt_count * sizeof *server_opts.endpts);
 
-    nc_ctx_lock(-1, NULL);
     server_opts.endpts[server_opts.endpt_count - 1].name = lydict_insert(server_opts.ctx, name, 0);
     server_opts.binds[server_opts.endpt_count - 1].address = lydict_insert(server_opts.ctx, address, 0);
-    nc_ctx_unlock();
     server_opts.binds[server_opts.endpt_count - 1].port = port;
     server_opts.binds[server_opts.endpt_count - 1].sock = sock;
     server_opts.binds[server_opts.endpt_count - 1].ti = ti;
     switch (ti) {
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     case NC_TI_LIBSSH:
         ssh_opts = calloc(1, sizeof *ssh_opts);
         /* set default values */
@@ -918,7 +878,7 @@ nc_server_add_endpt_listen(const char *name, const char *address, uint16_t port,
         server_opts.endpts[server_opts.endpt_count - 1].ti_opts = ssh_opts;
         break;
 #endif
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
     case NC_TI_OPENSSL:
         server_opts.endpts[server_opts.endpt_count - 1].ti_opts = calloc(1, sizeof(struct nc_server_tls_opts));
         break;
@@ -1007,20 +967,18 @@ nc_server_del_endpt(const char *name, NC_TRANSPORT_IMPL ti)
     if (!name && !ti) {
         /* remove all */
         for (i = 0; i < server_opts.endpt_count; ++i) {
-            nc_ctx_lock(-1, NULL);
             lydict_remove(server_opts.ctx, server_opts.endpts[i].name);
             lydict_remove(server_opts.ctx, server_opts.binds[i].address);
-            nc_ctx_unlock();
 
             close(server_opts.binds[i].sock);
             pthread_mutex_destroy(&server_opts.endpts[i].endpt_lock);
             switch (server_opts.binds[i].ti) {
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
             case NC_TI_LIBSSH:
                 nc_server_ssh_clear_opts(server_opts.endpts[i].ti_opts);
                 break;
 #endif
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
             case NC_TI_OPENSSL:
                 nc_server_tls_clear_opts(server_opts.endpts[i].ti_opts);
                 break;
@@ -1045,20 +1003,17 @@ nc_server_del_endpt(const char *name, NC_TRANSPORT_IMPL ti)
             if ((server_opts.binds[i].ti == ti) &&
                     (!name || !strcmp(server_opts.endpts[i].name, name))) {
 
-                nc_ctx_lock(-1, NULL);
                 lydict_remove(server_opts.ctx, server_opts.endpts[i].name);
                 lydict_remove(server_opts.ctx, server_opts.binds[i].address);
-                nc_ctx_unlock();
-
                 close(server_opts.binds[i].sock);
                 pthread_mutex_destroy(&server_opts.endpts[i].endpt_lock);
                 switch (server_opts.binds[i].ti) {
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
                 case NC_TI_LIBSSH:
                     nc_server_ssh_clear_opts(server_opts.endpts[i].ti_opts);
                     break;
 #endif
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
                 case NC_TI_OPENSSL:
                     nc_server_tls_clear_opts(server_opts.endpts[i].ti_opts);
                     break;
@@ -1142,9 +1097,7 @@ nc_accept(int timeout, struct nc_session **session)
     (*session)->side = NC_SERVER;
     (*session)->ctx = server_opts.ctx;
     (*session)->flags = NC_SESSION_SHAREDCTX;
-    nc_ctx_lock(-1, NULL);
     (*session)->host = lydict_insert_zc(server_opts.ctx, host);
-    nc_ctx_unlock();
     (*session)->port = port;
 
     /* transport lock */
@@ -1160,7 +1113,7 @@ nc_accept(int timeout, struct nc_session **session)
     (*session)->ti_opts = server_opts.endpts[idx].ti_opts;
 
     /* sock gets assigned to session or closed */
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     if (server_opts.binds[idx].ti == NC_TI_LIBSSH) {
         ret = nc_accept_ssh_session(*session, sock, timeout);
         if (ret < 1) {
@@ -1168,7 +1121,7 @@ nc_accept(int timeout, struct nc_session **session)
         }
     } else
 #endif
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
     if (server_opts.binds[idx].ti == NC_TI_OPENSSL) {
         ret = nc_accept_tls_session(*session, sock, timeout);
         if (ret < 1) {
@@ -1237,9 +1190,7 @@ nc_connect_callhome(const char *host, uint16_t port, NC_TRANSPORT_IMPL ti, int t
     (*session)->side = NC_SERVER;
     (*session)->ctx = server_opts.ctx;
     (*session)->flags = NC_SESSION_SHAREDCTX | NC_SESSION_CALLHOME;
-    nc_ctx_lock(-1, NULL);
     (*session)->host = lydict_insert(server_opts.ctx, host, 0);
-    nc_ctx_unlock();
     (*session)->port = port;
 
     /* transport lock */
@@ -1253,7 +1204,7 @@ nc_connect_callhome(const char *host, uint16_t port, NC_TRANSPORT_IMPL ti, int t
     pthread_mutex_init((*session)->ti_lock, NULL);
 
     /* sock gets assigned to session or closed */
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     if (ti == NC_TI_LIBSSH) {
         /* OPTS LOCK */
         pthread_mutex_lock(&ssh_ch_opts_lock);
@@ -1270,7 +1221,7 @@ nc_connect_callhome(const char *host, uint16_t port, NC_TRANSPORT_IMPL ti, int t
         }
     } else
 #endif
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
     if (ti == NC_TI_OPENSSL) {
         /* OPTS LOCK */
         pthread_mutex_lock(&tls_ch_opts_lock);
@@ -1316,4 +1267,4 @@ fail:
     return ret;
 }
 
-#endif /* ENABLE_SSH || ENABLE_TLS */
+#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */

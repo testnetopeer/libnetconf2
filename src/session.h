@@ -23,7 +23,7 @@
 #ifndef NC_SESSION_H_
 #define NC_SESSION_H_
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
 
 /**
  * @brief Enumeration of NETCONF SSH authentication methods
@@ -34,9 +34,9 @@ typedef enum {
     NC_SSH_AUTH_INTERACTIVE = 0x04 /**< interactive SSH authentication */
 } NC_SSH_AUTH_TYPE;
 
-#endif /* ENABLE_SSH */
+#endif /* NC_ENABLED_SSH */
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
 
 /**
  * @brief Enumeration of cert-to-name mapping types
@@ -51,7 +51,7 @@ typedef enum {
     NC_TLS_CTN_COMMON_NAME      /**< common name as username */
 } NC_TLS_CTN_MAPTYPE;
 
-#endif /* ENABLE_TLS */
+#endif /* NC_ENABLED_TLS */
 
 /**
  * @brief Enumeration of possible session statuses
@@ -70,10 +70,10 @@ typedef enum {
     NC_TI_NONE = 0,   /**< none - session is not connected yet */
     NC_TI_FD,         /**< file descriptors - use standard input/output, transport protocol is implemented
                            outside the current application */
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     NC_TI_LIBSSH,     /**< libssh - use libssh library, only for NETCONF over SSH transport */
 #endif
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
     NC_TI_OPENSSL     /**< OpenSSL - use OpenSSL library, only for NETCONF over TLS transport */
 #endif
 } NC_TRANSPORT_IMPL;
@@ -98,6 +98,14 @@ NC_STATUS nc_session_get_status(const struct nc_session *session);
  * @return Session ID.
  */
 uint32_t nc_session_get_id(const struct nc_session *session);
+
+/**
+ * @brief Get session NETCONF version.
+ *
+ * @param[in] session Session to get the information from.
+ * @return 0 for version 1.0, non-zero for version 1.1.
+ */
+int nc_session_get_version(const struct nc_session *session);
 
 /**
  * @brief Get session transport used.

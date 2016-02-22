@@ -25,13 +25,13 @@
 
 #include <libyang/libyang.h>
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
 
 #include <libssh/libssh.h>
 
 #endif
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
 
 #include <openssl/ssl.h>
 
@@ -76,7 +76,41 @@ int nc_client_schema_searchpath(const char *path);
  */
 struct nc_session *nc_connect_inout(int fdin, int fdout, struct ly_ctx *ctx);
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
+
+/**
+ * @brief Set SSH authentication hostkey check (knownhosts) callback.
+ *
+ * @param[in] auth_hostkey_check Function to call, returns 0 on success, non-zero in error.
+ *                               If NULL, the default callback is set.
+ */
+void nc_client_ssh_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session));
+
+/**
+ * @brief Set SSH password authentication callback.
+ *
+ * @param[in] auth_password Function to call, returns the password for username@hostname.
+ *                          If NULL, the default callback is set.
+ */
+void nc_client_ssh_set_auth_password_clb(char *(*auth_password)(const char *username, const char *hostname));
+
+/**
+ * @brief Set SSH interactive authentication callback.
+ *
+ * @param[in] auth_interactive Function to call for every question, returns the answer for
+ *                             authentication name with instruction and echoing prompt.
+ *                             If NULL, the default callback is set.
+ */
+void nc_client_ssh_set_auth_interactive_clb(char *(*auth_interactive)(const char *auth_name, const char *instruction,
+                                                                      const char *prompt, int echo));
+
+/**
+ * @brief Set SSH publickey authentication encrypted private key passphrase callback.
+ *
+ * @param[in] auth_privkey_passphrase Function to call for every question, returns
+ *                                    the passphrase for the specific private key.
+ */
+void nc_client_ssh_set_auth_privkey_passphrase_clb(char *(*auth_privkey_passphrase)(const char *privkey_path));
 
 /**
  * @brief Add an SSH public and private key pair to be used for client authentication.
@@ -223,9 +257,9 @@ struct nc_session *nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx
  */
 struct nc_session *nc_connect_ssh_channel(struct nc_session *session, struct ly_ctx *ctx);
 
-#endif /* ENABLE_SSH */
+#endif /* NC_ENABLED_SSH */
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
 
 /**
  * @brief Set client authentication identity - a certificate and a private key.
@@ -335,7 +369,7 @@ struct nc_session *nc_connect_tls(const char *host, uint16_t port, struct ly_ctx
  */
 struct nc_session *nc_connect_libssl(SSL *tls, struct ly_ctx *ctx);
 
-#endif /* ENABLE_TLS */
+#endif /* NC_ENABLED_TLS */
 
 /**
  * @brief Receive NETCONF RPC reply.
@@ -350,13 +384,15 @@ struct nc_session *nc_connect_libssl(SSL *tls, struct ly_ctx *ctx);
  * @param[in] msgid Expected message ID of the reply.
  * @param[in] timeout Timeout for reading in milliseconds. Use negative value for infinite
  *            waiting and 0 for immediate return if data are not available on wire.
+ * @param[in] parseroptions libyang parseroptions flags, do not set the data type, it is set
+ *            internally. LYD_OPT_DESTRUCT and LYD_OPT_NOSIBLINGS is ignored.
  * @param[out] reply Resulting object of NETCONF RPC reply.
  * @return #NC_MSG_REPLY for success, #NC_MSG_WOULDBLOCK if timeout has elapsed, #NC_MSG_ERROR if
  *         reading has failed, and #NC_MSG_NOTIF if a notification was read instead (call this
  *         function again to get the reply).
  */
 NC_MSG_TYPE nc_recv_reply(struct nc_session *session, struct nc_rpc *rpc, uint64_t msgid, int timeout,
-                          struct nc_reply **reply);
+                          int parseroptions, struct nc_reply **reply);
 
 /**
  * @brief Receive NETCONF Notification.

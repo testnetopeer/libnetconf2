@@ -35,11 +35,11 @@
 #include "config.h"
 
 /* millisec */
-#define NC_ACCEPT_TIMEOUT 1000
+#define NC_ACCEPT_TIMEOUT 5000
 /* millisec */
-#define NC_PS_POLL_TIMEOUT 1000
+#define NC_PS_POLL_TIMEOUT 5000
 /* sec */
-#define CLIENT_SSH_AUTH_TIMEOUT 3
+#define CLIENT_SSH_AUTH_TIMEOUT 10
 
 pthread_barrier_t barrier;
 
@@ -48,11 +48,11 @@ setup_lib(void)
 {
     nc_verbosity(NC_VERB_VERBOSE);
 
-#if defined(ENABLE_SSH) && defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) && defined(NC_ENABLED_TLS)
     nc_ssh_tls_init();
-#elif defined(ENABLE_SSH)
+#elif defined(NC_ENABLED_SSH)
     nc_ssh_init();
-#elif defined(ENABLE_TLS)
+#elif defined(NC_ENABLED_TLS)
     nc_tls_init();
 #endif
 
@@ -62,18 +62,18 @@ setup_lib(void)
 static int
 teardown_lib(void)
 {
-#if defined(ENABLE_SSH) && defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) && defined(NC_ENABLED_TLS)
     nc_ssh_tls_destroy();
-#elif defined(ENABLE_SSH)
+#elif defined(NC_ENABLED_SSH)
     nc_ssh_destroy();
-#elif defined(ENABLE_TLS)
+#elif defined(NC_ENABLED_TLS)
     nc_tls_destroy();
 #endif
 
     return 0;
 }
 
-#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
 
 static void *
 server_thread(void *arg)
@@ -88,7 +88,7 @@ server_thread(void *arg)
 
     pthread_barrier_wait(&barrier);
 
-#if defined(ENABLE_SSH) && defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) && defined(NC_ENABLED_TLS)
     ret = nc_accept(NC_ACCEPT_TIMEOUT, &session);
     assert(ret == 1);
 
@@ -112,9 +112,9 @@ server_thread(void *arg)
     return NULL;
 }
 
-#endif /* ENABLE_SSH || ENABLE_TLS */
+#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
 
 static void *
 ssh_add_endpt_thread(void *arg)
@@ -166,7 +166,7 @@ ssh_endpt_set_hostkey_thread(void *arg)
 
     pthread_barrier_wait(&barrier);
 
-    ret = nc_server_ssh_endpt_set_hostkey("main", "data/key_dsa");
+    ret = nc_server_ssh_endpt_set_hostkey("main", TESTS_DIR"/data/key_dsa");
     assert(!ret);
 
     return NULL;
@@ -236,7 +236,7 @@ ssh_endpt_add_authkey_thread(void *arg)
 
     pthread_barrier_wait(&barrier);
 
-    ret = nc_server_ssh_endpt_add_authkey("main", "data/key_rsa.pub", "test3");
+    ret = nc_server_ssh_endpt_add_authkey("main", TESTS_DIR"/data/key_rsa.pub", "test3");
     assert(!ret);
 
     return NULL;
@@ -250,10 +250,19 @@ ssh_endpt_del_authkey_thread(void *arg)
 
     pthread_barrier_wait(&barrier);
 
-    ret = nc_server_ssh_endpt_del_authkey("main", "data/key_ecdsa.pub", "test2");
+    ret = nc_server_ssh_endpt_del_authkey("main", TESTS_DIR"/data/key_ecdsa.pub", "test2");
     assert(!ret);
 
     return NULL;
+}
+
+static int
+ssh_hostkey_check_clb(const char *hostname, ssh_session session)
+{
+    (void)hostname;
+    (void)session;
+
+    return 0;
 }
 
 static void *
@@ -261,53 +270,22 @@ ssh_client_thread(void *arg)
 {
     (void)arg;
     int ret;
-    long timeout = CLIENT_SSH_AUTH_TIMEOUT;
-    uint32_t port;
-    ssh_session sshsession;
-    ssh_key pubkey, privkey;
     struct nc_session *session;
 
-    /* We cannot use nc_connect_ssh(), because we want to skip the knownhost check.
-    ret = nc_client_ssh_set_username("test");
-    assert_int_equal(ret, 0);
+    /* skip the knownhost check */
+    nc_client_ssh_set_auth_hostkey_check_clb(ssh_hostkey_check_clb);
 
-    ret = nc_client_ssh_add_keypair("data/key_dsa.pub", "data/key_dsa");
-    assert_int_equal(ret, 0);
+    ret = nc_client_ssh_set_username("test");
+    assert(!ret);
+
+    ret = nc_client_ssh_add_keypair(TESTS_DIR"/data/key_dsa.pub", TESTS_DIR"/data/key_dsa");
+    assert(!ret);
 
     nc_client_ssh_set_auth_pref(NC_SSH_AUTH_PUBLICKEY, 1);
     nc_client_ssh_set_auth_pref(NC_SSH_AUTH_PASSWORD, -1);
     nc_client_ssh_set_auth_pref(NC_SSH_AUTH_INTERACTIVE, -1);
 
-    session = nc_session_connect("127.0.0.1", NC_PORT_SSH, NULL);*/
-
-    port = 6001;
-
-    sshsession = ssh_new();
-    ssh_options_set(sshsession, SSH_OPTIONS_HOST, "127.0.0.1");
-    ssh_options_set(sshsession, SSH_OPTIONS_PORT, &port);
-    ssh_options_set(sshsession, SSH_OPTIONS_USER, "test");
-    ssh_options_set(sshsession, SSH_OPTIONS_TIMEOUT, &timeout);
-    ssh_options_set(sshsession, SSH_OPTIONS_HOSTKEYS, "ssh-ed25519,ssh-rsa,ssh-dss,ssh-rsa1");
-
-    ret = ssh_connect(sshsession);
-    assert(ret == SSH_OK);
-
-    /* authentication */
-    ret = ssh_userauth_none(sshsession, NULL);
-    assert(ret == SSH_AUTH_DENIED);
-    assert(ssh_userauth_list(sshsession, NULL) & SSH_AUTH_METHOD_PUBLICKEY);
-    ret = ssh_pki_import_pubkey_file("data/key_dsa.pub", &pubkey);
-    assert(ret == SSH_OK);
-    ret = ssh_userauth_try_publickey(sshsession, NULL, pubkey);
-    assert(ret == SSH_AUTH_SUCCESS);
-    ret = ssh_pki_import_privkey_file("data/key_dsa", NULL, NULL, NULL, &privkey);
-    assert(ret == SSH_OK);
-    ret = ssh_userauth_publickey(sshsession, NULL, privkey);
-    assert(ret == SSH_AUTH_SUCCESS);
-    ssh_key_free(pubkey);
-    ssh_key_free(privkey);
-
-    session = nc_connect_libssh(sshsession, NULL);
+    session = nc_connect_ssh("127.0.0.1", 6001, NULL);
     assert(session);
 
     nc_session_free(session);
@@ -348,9 +326,9 @@ thread_ssh_client(void)
     return client_tid;
 }
 
-#endif /* ENABLE_SSH */
+#endif /* NC_ENABLED_SSH */
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
 
 static void *
 tls_add_endpt_thread(void *arg)
@@ -535,7 +513,7 @@ tls_endpt_set_trusted_ca_paths_thread(void *arg)
 
     pthread_barrier_wait(&barrier);
 
-    ret = nc_server_tls_endpt_set_trusted_ca_paths("quaternary", "data/serverca.pem", "data");
+    ret = nc_server_tls_endpt_set_trusted_ca_paths("quaternary", TESTS_DIR"/data/serverca.pem", "data");
     assert(!ret);
 
     nc_thread_destroy();
@@ -617,9 +595,9 @@ tls_client_thread(void *arg)
     int ret;
     struct nc_session *session;
 
-    ret = nc_client_tls_set_cert_key_paths("data/client.crt", "data/client.key");
+    ret = nc_client_tls_set_cert_key_paths(TESTS_DIR"/data/client.crt", TESTS_DIR"/data/client.key");
     assert(!ret);
-    ret = nc_client_tls_set_trusted_ca_paths(NULL, "data");
+    ret = nc_client_tls_set_trusted_ca_paths(NULL, TESTS_DIR"/data");
     assert(!ret);
 
     session = nc_connect_tls("127.0.0.1", 6501, NULL);
@@ -663,13 +641,13 @@ thread_tls_client(void)
     return client_tid;
 }
 
-#endif /* ENABLE_TLS */
+#endif /* NC_ENABLED_TLS */
 
 static void *(*thread_funcs[])(void *) = {
-#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
     server_thread,
 #endif
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     ssh_add_endpt_thread,
     ssh_endpt_set_port_thread,
     ssh_del_endpt_thread,
@@ -681,7 +659,7 @@ static void *(*thread_funcs[])(void *) = {
     ssh_endpt_add_authkey_thread,
     ssh_endpt_del_authkey_thread,
 #endif
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
     tls_add_endpt_thread,
     tls_endpt_set_port_thread,
     tls_del_endpt_thread,
@@ -705,7 +683,7 @@ clients_start_cleanup(void)
     //static pid_t pids[2] = {0, 0};
     static pthread_t tids[2] = {0, 0};
 
-#if defined(ENABLE_SSH) && defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) && defined(NC_ENABLED_TLS)
     /*if (pids[0] && pids[1]) {
         waitpid(pids[0], NULL, 0);
         waitpid(pids[1], NULL, 0);
@@ -721,7 +699,7 @@ clients_start_cleanup(void)
     }
     tids[0] = thread_ssh_client();
     tids[1] = thread_tls_client();
-#elif defined(ENABLE_SSH)
+#elif defined(NC_ENABLED_SSH)
     /*if (pids[0]) {
         waitpid(pids[0], NULL, 0);
         return;
@@ -733,7 +711,7 @@ clients_start_cleanup(void)
         return;
     }
     tids[0] = thread_ssh_client();
-#elif defined(ENABLE_TLS)
+#elif defined(NC_ENABLED_TLS)
     /*if (pids[1]) {
         waitpid(pids[1], NULL, 0);
         return;
@@ -768,17 +746,17 @@ main(void)
 
     pthread_barrier_init(&barrier, NULL, thread_count);
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     /* do first, so that client can connect on SSH */
     ret = nc_server_ssh_add_endpt_listen("main", "0.0.0.0", 6001);
     assert(!ret);
-    ret = nc_server_ssh_endpt_add_authkey("main", "data/key_dsa.pub", "test");
+    ret = nc_server_ssh_endpt_add_authkey("main", TESTS_DIR"/data/key_dsa.pub", "test");
     assert(!ret);
-    ret = nc_server_ssh_endpt_set_hostkey("main", "data/key_rsa");
+    ret = nc_server_ssh_endpt_set_hostkey("main", TESTS_DIR"/data/key_rsa");
     assert(!ret);
 
     /* for ssh_endpt_del_authkey */
-    ret = nc_server_ssh_endpt_add_authkey("main", "data/key_ecdsa.pub", "test2");
+    ret = nc_server_ssh_endpt_add_authkey("main", TESTS_DIR"/data/key_ecdsa.pub", "test2");
     assert(!ret);
 
     /* for ssh_del_endpt */
@@ -790,15 +768,15 @@ main(void)
     assert(!ret);
 #endif
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
     /* do first, so that client can connect on TLS */
     ret = nc_server_tls_add_endpt_listen("main", "0.0.0.0", 6501);
     assert(!ret);
-    ret = nc_server_tls_endpt_set_cert_path("main", "data/server.crt");
+    ret = nc_server_tls_endpt_set_cert_path("main", TESTS_DIR"/data/server.crt");
     assert(!ret);
-    ret = nc_server_tls_endpt_set_key_path("main", "data/server.key");
+    ret = nc_server_tls_endpt_set_key_path("main", TESTS_DIR"/data/server.key");
     assert(!ret);
-    ret = nc_server_tls_endpt_add_trusted_cert_path("main", "data/client.crt");
+    ret = nc_server_tls_endpt_add_trusted_cert_path("main", TESTS_DIR"/data/client.crt");
     assert(!ret);
     ret = nc_server_tls_endpt_add_ctn("main", 0, "02:D3:03:0E:77:21:E2:14:1F:E5:75:48:98:6B:FD:8A:63:BB:DE:40:34", NC_TLS_CTN_SPECIFIED, "test");
     assert(!ret);
@@ -816,6 +794,8 @@ main(void)
     assert(!ret);
 #endif
 
+    ret = nc_client_schema_searchpath(TESTS_DIR"/../schemas");
+    assert(!ret);
     clients_start_cleanup();
 
     /* threads'n'stuff */
@@ -834,6 +814,7 @@ main(void)
 
     pthread_barrier_destroy(&barrier);
 
+    nc_client_schema_searchpath(NULL);
     nc_server_destroy();
     ly_ctx_destroy(ctx, NULL);
 

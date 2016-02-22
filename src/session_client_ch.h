@@ -29,7 +29,7 @@
 #include "netconf.h"
 #include "messages_client.h"
 
-#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
 
 /**
  * @brief Accept a Call Home connection on any of the listening binds.
@@ -42,9 +42,43 @@
  */
 int nc_accept_callhome(int timeout, struct ly_ctx *ctx, struct nc_session **session);
 
-#endif /* ENABLE_SSH || ENABLE_TLS */
+#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
+
+/**
+ * @brief Set SSH CALL Home authentication hostkey check (knownhosts) callback.
+ *
+ * @param[in] auth_hostkey_check Function to call, returns 0 on success, non-zero in error.
+ *                               If NULL, the default callback is set.
+ */
+void nc_client_ssh_ch_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session));
+
+/**
+ * @brief Set SSH Call Home password authentication callback.
+ *
+ * @param[in] auth_password Function to call, returns the password for username@hostname.
+ *                          If NULL, the default callback is set.
+ */
+void nc_client_ssh_ch_set_auth_password_clb(char *(*auth_password)(const char *username, const char *hostname));
+
+/**
+ * @brief Set SSH Call Home interactive authentication callback.
+ *
+ * @param[in] auth_interactive Function to call for every question, returns the answer for
+ *                             authentication name with instruction and echoing prompt.
+ *                             If NULL, the default callback is set.
+ */
+void nc_client_ssh_ch_set_auth_interactive_clb(char *(*auth_interactive)(const char *auth_name, const char *instruction,
+                                                                         const char *prompt, int echo));
+
+/**
+ * @brief Set SSH Call Home publickey authentication encrypted private key passphrase callback.
+ *
+ * @param[in] auth_privkey_passphrase Function to call for every question, returns
+ *                                    the passphrase for the specific private key.
+ */
+void nc_client_ssh_ch_set_auth_privkey_passphrase_clb(char *(*auth_privkey_passphrase)(const char *privkey_path));
 
 /**
  * @brief Add a new client bind and start listening on it for SSH Call Home connections.
@@ -139,9 +173,9 @@ int nc_client_ssh_ch_set_username(const char *username);
  */
 const char *nc_client_ssh_ch_get_username(void);
 
-#endif /* ENABLE_SSH */
+#endif /* NC_ENABLED_SSH */
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
 
 /**
  * @brief Add a new client bind and start listening on it for TLS Call Home connections.
@@ -224,6 +258,6 @@ int nc_client_tls_ch_set_crl_paths(const char *crl_file, const char *crl_dir);
  */
 void nc_client_tls_ch_get_crl_paths(const char **crl_file, const char **crl_dir);
 
-#endif /* ENABLE_TLS */
+#endif /* NC_ENABLED_TLS */
 
 #endif /* NC_SESSION_CLIENT_CH_H_ */

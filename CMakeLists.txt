@@ -1,13 +1,22 @@
-cmake_minimum_required(VERSION 2.8)
+cmake_minimum_required(VERSION 2.6)
 
 # include custom Modules
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/CMakeModules/")
 
 project(libnetconf2 C)
+set(LIBNETCONF2_DESCRIPTION "NETCONF server and client library in C.")
 
 # check the supported platform
 if(NOT UNIX)
     message(FATAL_ERROR "Only *nix like systems are supported.")
+endif()
+
+if(NOT LIB_INSTALL_DIR)
+    set(LIB_INSTALL_DIR lib)
+endif()
+
+if(NOT INCLUDE_INSTALL_DIR)
+    set(INCLUDE_INSTALL_DIR include)
 endif()
 
 # set default build type if not specified by user
@@ -21,8 +30,8 @@ set(CMAKE_C_FLAGS_DEBUG   "-g -O0")
 
 # set version
 set(LIBNETCONF2_MAJOR_VERSION 0)
-set(LIBNETCONF2_MINOR_VERSION 1)
-set(LIBNETCONF2_MICRO_VERSION 15)
+set(LIBNETCONF2_MINOR_VERSION 2)
+set(LIBNETCONF2_MICRO_VERSION 4)
 set(LIBNETCONF2_VERSION ${LIBNETCONF2_MAJOR_VERSION}.${LIBNETCONF2_MINOR_VERSION}.${LIBNETCONF2_MICRO_VERSION})
 set(LIBNETCONF2_SOVERSION ${LIBNETCONF2_MAJOR_VERSION}.${LIBNETCONF2_MINOR_VERSION})
 
@@ -51,14 +60,14 @@ if(ENABLE_SSH)
     set(libsrc ${libsrc}
         src/session_client_ssh.c
         src/session_server_ssh.c)
-    set(SSH_MACRO "#ifndef ENABLE_SSH\n#define ENABLE_SSH\n#endif")
+    set(SSH_MACRO "#ifndef NC_ENABLED_SSH\n#define NC_ENABLED_SSH\n#endif")
 endif()
 
 if(ENABLE_TLS)
     set(libsrc ${libsrc}
         src/session_client_tls.c
         src/session_server_tls.c)
-    set(TLS_MACRO "#ifndef ENABLE_TLS\n#define ENABLE_TLS\n#endif")
+    set(TLS_MACRO "#ifndef NC_ENABLED_TLS\n#define NC_ENABLED_TLS\n#endif")
 endif()
 
 set(headers
@@ -92,7 +101,7 @@ target_link_libraries(netconf2 ${CMAKE_THREAD_LIBS_INIT})
 # dependencies - libssh
 if(ENABLE_SSH)
     find_package(LibSSH 0.6.4 REQUIRED)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DENABLE_SSH ${LIBSSH_DEFINITIONS}")
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNC_ENABLED_SSH ${LIBSSH_DEFINITIONS}")
     target_link_libraries(netconf2 ${LIBSSH_LIBRARIES} -lssh_threads -lcrypt)
     include_directories(${LIBSSH_INCLUDE_DIRS})
 endif()
@@ -101,7 +110,7 @@ endif()
 if(ENABLE_TLS OR ENABLE_DNSSEC)
     find_package(OpenSSL REQUIRED)
     if (ENABLE_TLS)
-        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DENABLE_TLS")
+        set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNC_ENABLED_TLS")
     endif()
     target_link_libraries(netconf2 ${OPENSSL_LIBRARIES})
     include_directories(${OPENSSL_INCLUDE_DIR})
@@ -156,6 +165,22 @@ install(
     CODE "file(GLOB yin_schemas \"${CMAKE_SOURCE_DIR}/schemas/*.yin\")"
     CODE "file(INSTALL \${yin_schemas} DESTINATION ${DATA_INSTALL_DIR})"
 )
+
+# install pkg-config file
+find_package(PkgConfig)
+if(PKG_CONFIG_FOUND)
+    configure_file("libnetconf2.pc.in" "libnetconf2.pc" @ONLY)
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libnetconf2.pc" DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig")
+    # check that pkg-config includes the used path
+    execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE} --variable pc_path pkg-config RESULT_VARIABLE RETURN OUTPUT_VARIABLE PC_PATH ERROR_QUIET)
+    if(RETURN EQUAL 0)
+        string(REGEX MATCH "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig" SUBSTR "${PC_PATH}")
+        string(LENGTH "${SUBSTR}" SUBSTR_LEN)
+        if(SUBSTR_LEN EQUAL 0)
+            message(WARNING "pkg-config will not detect the new package after installation, adjust PKG_CONFIG_PATH using \"export PKG_CONFIG_PATH=\${PKG_CONFIG_PATH}:${CMAKE_INSTALL_PREFIX}/lib/pkgconfig\".")
+        endif()
+    endif()
+endif()
 
 if(ENABLE_VALGRIND_TESTS)
     set(ENABLE_BUILD_TESTS ON)

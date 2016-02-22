@@ -35,6 +35,7 @@
 #include "session_client_ch.h"
 #include "libnetconf.h"
 
+extern struct nc_client_opts client_opts;
 static struct nc_client_tls_opts tls_opts;
 static struct nc_client_tls_opts tls_ch_opts;
 
@@ -543,7 +544,11 @@ nc_connect_tls(const char *host, unsigned short port, struct ly_ctx *ctx)
 
     /* assign context (dicionary needed for handshake) */
     if (!ctx) {
-        ctx = ly_ctx_new(SCHEMAS_DIR);
+        if (client_opts.schema_searchpath) {
+            ctx = ly_ctx_new(client_opts.schema_searchpath);
+        } else {
+            ctx = ly_ctx_new(SCHEMAS_DIR);
+        }
     } else {
         session->flags |= NC_SESSION_SHAREDCTX;
     }
@@ -604,7 +609,11 @@ nc_connect_libssl(SSL *tls, struct ly_ctx *ctx)
 
     /* assign context (dicionary needed for handshake) */
     if (!ctx) {
-        ctx = ly_ctx_new(SCHEMAS_DIR);
+        if (client_opts.schema_searchpath) {
+            ctx = ly_ctx_new(client_opts.schema_searchpath);
+        } else {
+            ctx = ly_ctx_new(SCHEMAS_DIR);
+        }
     } else {
         session->flags |= NC_SESSION_SHAREDCTX;
     }
@@ -670,6 +679,8 @@ nc_accept_callhome_tls_sock(int sock, const char *host, uint16_t port, struct ly
 
     session = nc_connect_libssl(tls, ctx);
     if (session) {
+        session->flags |= NC_SESSION_CALLHOME;
+
         /* store information into session and the dictionary */
         session->host = lydict_insert(session->ctx, host, 0);
         session->port = port;

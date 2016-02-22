@@ -53,9 +53,8 @@ void nc_session_set_term_reason(struct nc_session *session, NC_SESSION_TERM_REAS
  * @brief Initialize the server using a libyang context.
  *
  * The context is not modified internally, only its dictionary is used for holding
- * all the strings. When the dictionary is being written to or removed from,
- * libnetconf2 always holds ctx lock using nc_ctx_lock(). Reading models is considered
- * thread-safe as models cannot be removed and are rarely modified.
+ * all the strings, which is thread-safe. Reading models is considered thread-safe
+ * as models cannot be removed and are rarely modified (augments or deviations).
  *
  * Server capabilities are generated based on its content. Changing the context
  * in ways that result in changed capabilities (adding models, changing features)
@@ -70,9 +69,6 @@ void nc_session_set_term_reason(struct nc_session *session, NC_SESSION_TERM_REAS
  * This callback is called by nc_ps_poll() if the particular RPC request is
  * received. Callbacks for ietf-netconf:get-schema (supporting YANG and YIN format
  * only) and ietf-netconf:close-session are set internally if left unset.
- *
- * Access to the context in libnetconf2 functions is not managed in any way,
- * the application is responsible for handling it in a thread-safe manner.
  *
  * @param[in] ctx Core NETCONF server context.
  * @return 0 on success, -1 on error.
@@ -205,25 +201,7 @@ int nc_ps_poll(struct nc_pollsession *ps, int timeout);
  */
 void nc_ps_clear(struct nc_pollsession *ps);
 
-/**
- * @brief Lock server context.
- *
- * @param[in] timeout Timeout in milliseconds. 0 for non-blocking call, -1 for
- *                    infinite waiting.
- * @param[out] elapsed Elapsed milliseconds will be added to this variable.
- *                     Can be NULL.
- * @return 1 on success, 0 on elapsed timeout, -1 on error.
- */
-int nc_ctx_lock(int timeout, int *elapsed);
-
-/**
- * @brief Unlock server context.
- *
- * @return 0 on success, -1 on error.
- */
-int nc_ctx_unlock(void);
-
-#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
 
 /**
  * @brief Accept new sessions on all the listening endpoints.
@@ -235,9 +213,9 @@ int nc_ctx_unlock(void);
  */
 int nc_accept(int timeout, struct nc_session **session);
 
-#endif /* ENABLE_SSH || ENABLE_TLS */
+#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
 
 /**
  * @brief Accept a new NETCONF session on an SSH session of a running NETCONF session
@@ -358,9 +336,9 @@ int nc_server_ssh_endpt_add_authkey(const char *endpt_name, const char *pubkey_p
  */
 int nc_server_ssh_endpt_del_authkey(const char *endpt_name, const char *pubkey_path, const char *username);
 
-#endif /* ENABLE_SSH */
+#endif /* NC_ENABLED_SSH */
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
 
 /**
  * @brief Add a new TLS endpoint and start listening on it.
@@ -449,7 +427,8 @@ int nc_server_tls_endpt_set_key(const char *endpt_name, const char *privkey, int
 int nc_server_tls_endpt_set_key_path(const char *endpt_name, const char *privkey_path);
 
 /**
- * @brief Add a trusted certificate. Can be both a CA or a client one.
+ * @brief Add a trusted certificate. Can be both a CA or a client one. Can be
+ *        safely used together with #nc_server_tls_endpt_set_trusted_ca_paths().
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] cert Base64-enocded certificate in ASN.1 DER encoding.
@@ -458,7 +437,8 @@ int nc_server_tls_endpt_set_key_path(const char *endpt_name, const char *privkey
 int nc_server_tls_endpt_add_trusted_cert(const char *endpt_name, const char *cert);
 
 /**
- * @brief Add a trusted certificate. Can be both a CA or a client one.
+ * @brief Add a trusted certificate. Can be both a CA or a client one. Can be
+ *        safely used together with #nc_server_tls_endpt_set_trusted_ca_paths().
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] cert_path Path to a trusted certificate file in PEM format.
@@ -468,7 +448,8 @@ int nc_server_tls_endpt_add_trusted_cert_path(const char *endpt_name, const char
 
 /**
  * @brief Set trusted Certificate Authority certificate locations. There can only be
- *        one file and one directory, they are replaced if already set.
+ *        one file and one directory, they are replaced if already set. Can be safely
+ *        used with #nc_server_tls_endpt_add_trusted_cert() or its _path variant.
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] ca_file Path to a trusted CA cert store file in PEM format. Can be NULL.
@@ -530,6 +511,6 @@ int nc_server_tls_endpt_add_ctn(const char *endpt_name, uint32_t id, const char 
  */
 int nc_server_tls_endpt_del_ctn(const char *endpt_name, int64_t id, const char *fingerprint, NC_TLS_CTN_MAPTYPE map_type, const char *name);
 
-#endif /* ENABLE_TLS */
+#endif /* NC_ENABLED_TLS */
 
 #endif /* NC_SESSION_SERVER_H_ */

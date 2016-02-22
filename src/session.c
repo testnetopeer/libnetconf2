@@ -31,19 +31,19 @@
 #include "libnetconf.h"
 #include "session_server.h"
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
 
 #   include <libssh/libssh.h>
 
-#endif /* ENABLE_SSH */
+#endif /* NC_ENABLED_SSH */
 
-#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
 
 #   include <openssl/engine.h>
 #   include <openssl/conf.h>
 #   include <openssl/err.h>
 
-#endif /* ENABLE_SSH || ENABLE_TLS */
+#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
 
 /* in seconds */
 #define NC_CLIENT_HELLO_TIMEOUT 60
@@ -134,6 +134,17 @@ nc_session_get_id(const struct nc_session *session)
     }
 
     return session->id;
+}
+
+API int
+nc_session_get_version(const struct nc_session *session)
+{
+    if (!session) {
+        ERRARG;
+        return -1;
+    }
+
+    return (session->version == NC_VERSION_10 ? 0 : 1);
 }
 
 API NC_TRANSPORT_IMPL
@@ -354,7 +365,7 @@ nc_session_free(struct nc_session *session)
         (void)siter;
         break;
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
     case NC_TI_LIBSSH:
         if (connected) {
             ssh_channel_free(session->ti.libssh.channel);
@@ -381,14 +392,8 @@ nc_session_free(struct nc_session *session)
                     session->ti.libssh.next = siter->ti.libssh.next;
 
                     /* free starting SSH NETCONF session (channel will be freed in ssh_free()) */
-                    if (session->side == NC_SERVER) {
-                        nc_ctx_lock(-1, NULL);
-                    }
                     lydict_remove(session->ctx, session->username);
                     lydict_remove(session->ctx, session->host);
-                    if (session->side == NC_SERVER) {
-                        nc_ctx_unlock();
-                    }
                     if (!(session->flags & NC_SESSION_SHAREDCTX)) {
                         ly_ctx_destroy(session->ctx, NULL);
                     }
@@ -425,7 +430,7 @@ nc_session_free(struct nc_session *session)
         break;
 #endif
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
     case NC_TI_OPENSSL:
         if (connected) {
             SSL_shutdown(session->ti.tls);
@@ -440,14 +445,8 @@ nc_session_free(struct nc_session *session)
         break;
     }
 
-    if (session->side == NC_SERVER) {
-        nc_ctx_lock(-1, NULL);
-    }
     lydict_remove(session->ctx, session->username);
     lydict_remove(session->ctx, session->host);
-    if (session->side == NC_SERVER) {
-        nc_ctx_unlock();
-    }
 
     /* final cleanup */
     if (session->ti_lock) {
@@ -491,11 +490,8 @@ create_cpblts(struct ly_ctx *ctx)
     int size = 10, count, feat_count = 0, i, str_len;
     char str[512];
 
-    nc_ctx_lock(-1, NULL);
-
     yanglib = ly_ctx_info(ctx);
     if (!yanglib) {
-        nc_ctx_unlock();
         return NULL;
     }
 
@@ -637,8 +633,6 @@ create_cpblts(struct ly_ctx *ctx)
 
     lyd_free(yanglib);
 
-    nc_ctx_unlock();
-
     /* ending NULL capability */
     add_cpblt(ctx, NULL, &cpblts, &size, &count);
 
@@ -733,11 +727,9 @@ nc_send_server_hello(struct nc_session *session)
 
     r = nc_write_msg(session, NC_MSG_HELLO, cpblts, &session->id);
 
-    nc_ctx_lock(-1, NULL);
     for (i = 0; cpblts[i]; ++i) {
         lydict_remove(session->ctx, cpblts[i]);
     }
-    nc_ctx_unlock();
     free(cpblts);
 
     if (r) {
@@ -871,9 +863,7 @@ nc_recv_server_hello(struct nc_session *session)
     }
 
 cleanup:
-    nc_ctx_lock(-1, NULL);
     lyxml_free(session->ctx, xml);
-    nc_ctx_unlock();
 
     return msgtype;
 }
@@ -906,7 +896,7 @@ nc_handshake(struct nc_session *session)
     return 0;
 }
 
-#ifdef ENABLE_SSH
+#ifdef NC_ENABLED_SSH
 
 API void
 nc_ssh_init(void)
@@ -925,9 +915,9 @@ nc_ssh_destroy(void)
     ssh_finalize();
 }
 
-#endif /* ENABLE_SSH */
+#endif /* NC_ENABLED_SSH */
 
-#ifdef ENABLE_TLS
+#ifdef NC_ENABLED_TLS
 
 static pthread_mutex_t *tls_locks;
 
@@ -1030,9 +1020,9 @@ nc_tls_destroy(void)
     CRYPTO_set_dynlock_destroy_callback(NULL);
 }
 
-#endif /* ENABLE_TLS */
+#endif /* NC_ENABLED_TLS */
 
-#if defined(ENABLE_SSH) || defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
 
 API void
 nc_thread_destroy(void) {
@@ -1045,9 +1035,9 @@ nc_thread_destroy(void) {
     ERR_remove_thread_state(&crypto_tid);
 }
 
-#endif /* ENABLE_SSH || ENABLE_TLS */
+#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
 
-#if defined(ENABLE_SSH) && defined(ENABLE_TLS)
+#if defined(NC_ENABLED_SSH) && defined(NC_ENABLED_TLS)
 
 API void
 nc_ssh_tls_init(void)
@@ -1076,4 +1066,4 @@ nc_ssh_tls_destroy(void)
     CRYPTO_set_dynlock_destroy_callback(NULL);
 }
 
-#endif /* ENABLE_SSH && ENABLE_TLS */
+#endif /* NC_ENABLED_SSH && NC_ENABLED_TLS */
