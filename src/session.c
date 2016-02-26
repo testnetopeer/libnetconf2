@@ -5,19 +5,11 @@
  *
  * Copyright (c) 2015 CESNET, z.s.p.o.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name of the Company nor the names of its contributors
- *    may be used to endorse or promote products derived from this
- *    software without specific prior written permission.
+ * This source code is licensed under BSD 3-Clause License (the "License").
+ * You may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
+ *     https://opensource.org/licenses/BSD-3-Clause
  */
 
 #include <errno.h>
@@ -99,19 +91,6 @@ nc_timedlock(pthread_mutex_t *lock, int timeout, int *elapsed)
 
     /* ok */
     return 1;
-}
-
-void
-nc_subtract_elapsed(int *timeout, struct timespec *old_ts)
-{
-    struct timespec new_ts;
-
-    clock_gettime(CLOCK_MONOTONIC_RAW, &new_ts);
-
-    *timeout -= (new_ts.tv_sec - old_ts->tv_sec) * 1000;
-    *timeout -= (new_ts.tv_nsec - old_ts->tv_nsec) / 1000000;
-
-    *old_ts = new_ts;
 }
 
 API NC_STATUS
@@ -911,7 +890,7 @@ nc_ssh_destroy(void)
 {
     ENGINE_cleanup();
     CONF_modules_unload(1);
-    ERR_remove_state(0);
+    nc_thread_destroy();
     ssh_finalize();
 }
 
@@ -1003,12 +982,12 @@ nc_tls_destroy(void)
     int i;
 
     CRYPTO_cleanup_all_ex_data();
-    ERR_remove_state(0);
+    nc_thread_destroy();
     EVP_cleanup();
     ERR_free_strings();
     sk_SSL_COMP_free(SSL_COMP_get_compression_methods());
 
-    CRYPTO_set_id_callback(NULL);
+    CRYPTO_THREADID_set_callback(NULL);
     CRYPTO_set_locking_callback(NULL);
     for (i = 0; i < CRYPTO_num_locks(); ++i) {
         pthread_mutex_destroy(tls_locks + i);

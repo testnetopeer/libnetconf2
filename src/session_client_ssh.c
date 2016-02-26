@@ -8,19 +8,11 @@
  *
  * Copyright (c) 2015 CESNET, z.s.p.o.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name of the Company nor the names of its contributors
- *    may be used to endorse or promote products derived from this
- *    software without specific prior written permission.
+ * This source code is licensed under BSD 3-Clause License (the "License").
+ * You may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
+ *     https://opensource.org/licenses/BSD-3-Clause
  */
 
 #define _GNU_SOURCE
@@ -86,7 +78,7 @@ _nc_client_ssh_destroy_opts(struct nc_client_ssh_opts *opts)
     free(opts->username);
 }
 
-API void
+void
 nc_client_ssh_destroy_opts(void)
 {
     _nc_client_ssh_destroy_opts(&ssh_opts);
@@ -98,7 +90,7 @@ nc_client_ssh_destroy_opts(void)
 /* return 0 (DNSSEC + key valid), 1 (unsecure DNS + key valid), 2 (key not found or an error) */
 /* type - 1 (RSA), 2 (DSA), 3 (ECDSA); alg - 1 (SHA1), 2 (SHA-256) */
 static int
-sshauth_hostkey_hash_dnssec_check(const char *hostname, const char *sha1hash, int type, int alg) {
+sshauth_hostkey_hash_dnssec_check(const char *hostname, const unsigned char *sha1hash, int type, int alg) {
     ns_msg handle;
     ns_rr rr;
     val_status_t val_status;
@@ -134,13 +126,13 @@ sshauth_hostkey_hash_dnssec_check(const char *hostname, const char *sha1hash, in
 
     /* query section */
     if (ns_parserr(&handle, ns_s_qd, 0, &rr)) {
-        ERROR("DNSSEC query section parser fail.");
+        ERR("DNSSEC query section parser fail.");
         ret = 2;
         goto finish;
     }
 
     if (strcmp(hostname, ns_rr_name(rr)) || (ns_rr_type(rr) != 44) || (ns_rr_class(rr) != 1)) {
-        ERROR("DNSSEC query in the answer does not match the original query.");
+        ERR("DNSSEC query in the answer does not match the original query.");
         ret = 2;
         goto finish;
     }
@@ -238,11 +230,11 @@ hostkey_not_known:
 #ifdef ENABLE_DNSSEC
         if ((srv_pubkey_type != SSH_KEYTYPE_UNKNOWN) || (srv_pubkey_type != SSH_KEYTYPE_RSA1)) {
             if (srv_pubkey_type == SSH_KEYTYPE_DSS) {
-                ret = callback_ssh_hostkey_hash_dnssec_check(hostname, hash_sha1, 2, 1);
+                ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 2, 1);
             } else if (srv_pubkey_type == SSH_KEYTYPE_RSA) {
-                ret = callback_ssh_hostkey_hash_dnssec_check(hostname, hash_sha1, 1, 1);
+                ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 1, 1);
             } else if (srv_pubkey_type == SSH_KEYTYPE_ECDSA) {
-                ret = callback_ssh_hostkey_hash_dnssec_check(hostname, hash_sha1, 3, 1);
+                ret = sshauth_hostkey_hash_dnssec_check(hostname, hash_sha1, 3, 1);
             }
 
             /* DNSSEC SSHFP check successful, that's enough */
@@ -1030,6 +1022,10 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts)
                     if (prompt == NULL) {
                         break;
                     }
+
+                    /* libssh BUG - echo is always 1 for some reason, assume always 0 */
+                    echo = 0;
+
                     answer = opts->auth_interactive(ssh_userauth_kbdint_getname(ssh_sess),
                                                     ssh_userauth_kbdint_getinstruction(ssh_sess),
                                                     prompt, echo);

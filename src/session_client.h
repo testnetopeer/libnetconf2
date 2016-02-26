@@ -5,19 +5,11 @@
  *
  * Copyright (c) 2015 CESNET, z.s.p.o.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name of the Company nor the names of its contributors
- *    may be used to endorse or promote products derived from this
- *    software without specific prior written permission.
+ * This source code is licensed under BSD 3-Clause License (the "License").
+ * You may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
+ *     https://opensource.org/licenses/BSD-3-Clause
  */
 
 #ifndef NC_SESSION_CLIENT_H_
@@ -53,6 +45,11 @@
  * @return 0 on success, 1 on (memory allocation) failure.
  */
 int nc_client_schema_searchpath(const char *path);
+
+/**
+ * @brief Destroy all the client options, for both SSH and TLS, and for Call Home too.
+ */
+void nc_client_destroy(void);
 
 /**
  * @brief Connect to the NETCONF server via proviaded input/output file descriptors.
@@ -188,13 +185,6 @@ int nc_client_ssh_set_username(const char *username);
 const char *nc_client_ssh_get_username(void);
 
 /**
- * @brief Destroy any dynamically allocated SSH-specific client context (including Call Home).
- *
- * Function is provided only via nc_client.h header file and only when libnetconf2 is compiled with libssh support.
- */
-void nc_client_ssh_destroy_opts(void);
-
-/**
  * @brief Connect to the NETCONF server using SSH transport (via libssh).
  *
  * SSH session is created with default options. If the caller needs to use specific SSH session properties,
@@ -320,13 +310,6 @@ int nc_client_tls_set_crl_paths(const char *crl_file, const char *crl_dir);
  * @param[out] crl_dir Location of the CRL certificate directory used to check for revocated certificates.
  */
 void nc_client_tls_get_crl_paths(const char **crl_file, const char **crl_dir);
-
-/**
- * @brief Destroy any dynamically allocated TLS-specific client data (including Call Home).
- *
- * Function is provided only via nc_client.h header file and only when libnetconf2 is compiled with TLS support.
- */
-void nc_client_tls_destroy_opts(void);
 
 /**
  * @brief Connect to the NETCONF server using TLS transport (via libssl)

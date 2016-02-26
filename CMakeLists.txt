@@ -19,6 +19,12 @@ if(NOT INCLUDE_INSTALL_DIR)
     set(INCLUDE_INSTALL_DIR include)
 endif()
 
+set(INCLUDE_INSTALL_SUBDIR ${INCLUDE_INSTALL_DIR}/libnetconf2)
+
+if(NOT DATA_INSTALL_DIR)
+    set(DATA_INSTALL_DIR share/libnetconf2)
+endif()
+
 # set default build type if not specified by user
 if(NOT CMAKE_BUILD_TYPE)
     set(CMAKE_BUILD_TYPE debug)
@@ -31,7 +37,7 @@ set(CMAKE_C_FLAGS_DEBUG   "-g -O0")
 # set version
 set(LIBNETCONF2_MAJOR_VERSION 0)
 set(LIBNETCONF2_MINOR_VERSION 2)
-set(LIBNETCONF2_MICRO_VERSION 4)
+set(LIBNETCONF2_MICRO_VERSION 9)
 set(LIBNETCONF2_VERSION ${LIBNETCONF2_MAJOR_VERSION}.${LIBNETCONF2_MINOR_VERSION}.${LIBNETCONF2_MICRO_VERSION})
 set(LIBNETCONF2_SOVERSION ${LIBNETCONF2_MAJOR_VERSION}.${LIBNETCONF2_MINOR_VERSION})
 
@@ -139,19 +145,6 @@ if(DOXYGEN_FOUND)
     configure_file(Doxyfile.in Doxyfile)
 endif()
 
-if(NOT LIB_INSTALL_DIR)
-    set(LIB_INSTALL_DIR ${CMAKE_INSTALL_PREFIX}/lib)
-endif()
-
-if(NOT INCLUDE_INSTALL_DIR)
-    set(INCLUDE_INSTALL_DIR ${CMAKE_INSTALL_PREFIX}/include)
-endif()
-set(INCLUDE_INSTALL_SUBDIR ${INCLUDE_INSTALL_DIR}/libnetconf2)
-
-if(NOT DATA_INSTALL_DIR)
-    set(DATA_INSTALL_DIR ${CMAKE_INSTALL_PREFIX}/share/libnetconf2)
-endif()
-
 # install library
 install(TARGETS netconf2 DESTINATION ${LIB_INSTALL_DIR})
 
@@ -163,21 +156,21 @@ install(FILES ${headers} DESTINATION ${INCLUDE_INSTALL_SUBDIR})
 # install schemas
 install(
     CODE "file(GLOB yin_schemas \"${CMAKE_SOURCE_DIR}/schemas/*.yin\")"
-    CODE "file(INSTALL \${yin_schemas} DESTINATION ${DATA_INSTALL_DIR})"
+    CODE "file(INSTALL \${yin_schemas} DESTINATION ${CMAKE_INSTALL_PREFIX}/${DATA_INSTALL_DIR})"
 )
 
 # install pkg-config file
 find_package(PkgConfig)
 if(PKG_CONFIG_FOUND)
     configure_file("libnetconf2.pc.in" "libnetconf2.pc" @ONLY)
-    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libnetconf2.pc" DESTINATION "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libnetconf2.pc" DESTINATION "${CMAKE_INSTALL_PREFIX}/${LIB_INSTALL_DIR}/pkgconfig")
     # check that pkg-config includes the used path
     execute_process(COMMAND ${PKG_CONFIG_EXECUTABLE} --variable pc_path pkg-config RESULT_VARIABLE RETURN OUTPUT_VARIABLE PC_PATH ERROR_QUIET)
     if(RETURN EQUAL 0)
-        string(REGEX MATCH "${CMAKE_INSTALL_PREFIX}/lib/pkgconfig" SUBSTR "${PC_PATH}")
+        string(REGEX MATCH "${CMAKE_INSTALL_PREFIX}/${LIB_INSTALL_DIR}/pkgconfig" SUBSTR "${PC_PATH}")
         string(LENGTH "${SUBSTR}" SUBSTR_LEN)
         if(SUBSTR_LEN EQUAL 0)
-            message(WARNING "pkg-config will not detect the new package after installation, adjust PKG_CONFIG_PATH using \"export PKG_CONFIG_PATH=\${PKG_CONFIG_PATH}:${CMAKE_INSTALL_PREFIX}/lib/pkgconfig\".")
+            message(WARNING "pkg-config will not detect the new package after installation, adjust PKG_CONFIG_PATH using \"export PKG_CONFIG_PATH=\${PKG_CONFIG_PATH}:${CMAKE_INSTALL_PREFIX}/${LIB_INSTALL_DIR}/pkgconfig\".")
         endif()
     endif()
 endif()
@@ -187,8 +180,11 @@ if(ENABLE_VALGRIND_TESTS)
 endif()
 
 if(ENABLE_BUILD_TESTS)
-    enable_testing()
-    add_subdirectory(tests)
+    find_package(CMocka 1.0.0)
+    if(CMOCKA_FOUND)
+        enable_testing()
+        add_subdirectory(tests)
+    endif(CMOCKA_FOUND)
 endif()
 
 configure_file("${PROJECT_SOURCE_DIR}/src/config.h.in" "${PROJECT_SOURCE_DIR}/src/config.h" ESCAPE_QUOTES @ONLY)

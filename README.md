@@ -1,5 +1,9 @@
 # libnetconf2 – The NETCONF protocol library
 
+[![BSD license](https://img.shields.io/badge/License-BSD-blue.svg)](https://opensource.org/licenses/BSD-3-Clause)
+[![Build Status](https://secure.travis-ci.org/CESNET/libnetconf2.png?branch=master)](http://travis-ci.org/CESNET/libnetconf2)
+[![Coverity Scan Build Status](https://scan.coverity.com/projects/7642/badge.svg)](https://scan.coverity.com/projects/7642)
+
 **libnetconf2** is a NETCONF library in C intended for building NETCONF clients
 and servers. NETCONF is the [NETwork CONFiguration protocol]
 (http://trac.tools.ietf.org/wg/netconf/trac/wiki) introduced by IETF.
@@ -50,7 +54,9 @@ $ make
 
 ### libssh
 Required version is at least 0.6.4. This dependency can be removed by disabling
-SSH support (see the [Build Options](#build-ptions) section.
+SSH support (see the [Build Options](#build-options) section). Below si the basic
+sequence of commands for compiling and installing it from source. However, there
+are packages for certain Linux distributions available [here](https://www.libssh.org/get-it/).
 ```
 $ git clone http://git.libssh.org/projects/libssh.git
 $ cd libssh; mkdir build; cd build
@@ -70,8 +76,16 @@ manager for OpenSSL package including the necessary development files
 
 ## Optional Dependencies
 
+### libval (part of the DNSSEC-Tools suite)
+It is required only if DNSSEC SSHFP retrieval is enabled (it is disabled by
+default, see the [Build Options](#build-options) secion).
+
+The easier way of installing it is as a part of the dnssec-tools package,
+if you can find it for your distribution. Packages for some distributions
+or the source can be downloaded from [here](https://www.dnssec-tools.org/download/).
+
 ### cmocka
-For running the tests.
+For running the tests (see the [Tests](#tests) section for more information).
 ```
 $ git clone git://git.cryptomilk.org/projects/cmocka.git
 $ cd cmocka
@@ -95,6 +109,12 @@ $ mkdir build; cd build
 $ cmake ..
 $ make
 # install
+```
+
+The library documentation can be generated directly from the source codes using
+Doxygen tool:
+```
+$ make doc
 ```
 
 ## Build Options
@@ -126,7 +146,17 @@ enabled. Disabling and enabling both the transport protocols can be made
 in the same way. The following command has actually the same effect as
 specifying no option since it specifies the default settings.
 ```
-$ cmake -DENABLE_TLS=OFF -DENABLE_SSH=ON .. 
+$ cmake -DENABLE_TLS=OFF -DENABLE_SSH=ON ..
+```
+
+### DNSSEC SSHFP Retrieval
+
+In SSH connections, if the remote NETCONF server supports it and it is
+enabled, it is possible to safely retrieve server host key fingerprints
+using DNSSEC and automatically consider them to be trusted without any
+interaction. Enable it with the following command.
+```
+$ cmake -DENABLE_DNSSEC=ON ..
 ```
 
 ### Build Modes

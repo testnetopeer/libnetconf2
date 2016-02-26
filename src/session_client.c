@@ -5,25 +5,18 @@
  *
  * Copyright (c) 2015 CESNET, z.s.p.o.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name of the Company nor the names of its contributors
- *    may be used to endorse or promote products derived from this
- *    software without specific prior written permission.
+ * This source code is licensed under BSD 3-Clause License (the "License").
+ * You may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
+ *     https://opensource.org/licenses/BSD-3-Clause
  */
 
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <netdb.h>
+#include <netinet/in.h>
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
@@ -943,6 +936,21 @@ nc_accept_callhome(int timeout, struct ly_ctx *ctx, struct nc_session **session)
 }
 
 #endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
+
+API void
+nc_client_destroy(void)
+{
+    nc_client_schema_searchpath(NULL);
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
+    nc_client_ch_del_bind(NULL, 0, 0);
+#endif
+#ifdef NC_ENABLED_SSH
+    nc_client_ssh_destroy_opts();
+#endif
+#ifdef NC_ENABLED_TLS
+    nc_client_tls_destroy_opts();
+#endif
+}
 
 API NC_MSG_TYPE
 nc_recv_reply(struct nc_session *session, struct nc_rpc *rpc, uint64_t msgid, int timeout, int parseroptions, struct nc_reply **reply)

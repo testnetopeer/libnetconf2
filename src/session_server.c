@@ -5,19 +5,11 @@
  *
  * Copyright (c) 2015 CESNET, z.s.p.o.
  *
- * Redistribution and use in source and binary forms, with or without
- * modification, are permitted provided that the following conditions
- * are met:
- * 1. Redistributions of source code must retain the above copyright
- *    notice, this list of conditions and the following disclaimer.
- * 2. Redistributions in binary form must reproduce the above copyright
- *    notice, this list of conditions and the following disclaimer in
- *    the documentation and/or other materials provided with the
- *    distribution.
- * 3. Neither the name of the Company nor the names of its contributors
- *    may be used to endorse or promote products derived from this
- *    software without specific prior written permission.
+ * This source code is licensed under BSD 3-Clause License (the "License").
+ * You may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
  *
+ *     https://opensource.org/licenses/BSD-3-Clause
  */
 
 #include <stdint.h>
@@ -632,7 +624,6 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout)
     NC_MSG_TYPE msgtype;
     struct nc_session *session;
     struct nc_server_rpc *rpc;
-    struct timespec old_ts;
 
     if (!ps || !ps->session_count) {
         ERRARG;
@@ -658,10 +649,6 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout)
         if (ps->pfds[i].revents) {
             break;
         }
-    }
-
-    if (timeout > 0) {
-        clock_gettime(CLOCK_MONOTONIC_RAW, &old_ts);
     }
 
     if (i == ps->session_count) {
@@ -723,7 +710,7 @@ retry_poll:
                         usleep(NC_TIMEOUT_STEP);
                         if (timeout > 0) {
                             /* ... and decrease timeout, if not -1 */
-                            nc_subtract_elapsed(&timeout, &old_ts);
+                            timeout -= NC_TIMEOUT_STEP * 1000;
                         }
                         goto retry_poll;
                     }
@@ -746,10 +733,6 @@ retry_poll:
 
     /* this is the session with some data available for reading */
     session = ps->sessions[i];
-
-    if (timeout > 0) {
-        nc_subtract_elapsed(&timeout, &old_ts);
-    }
 
     /* reading an RPC and sending a reply must be atomic (no other RPC should be read) */
     ret = nc_timedlock(session->ti_lock, timeout, NULL);
