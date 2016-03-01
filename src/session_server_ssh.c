@@ -313,7 +313,11 @@ nc_server_ssh_add_authkey(const char *pubkey_path, const char *username, struct 
     }
 
     ++opts->authkey_count;
-    opts->authkeys = realloc(opts->authkeys, opts->authkey_count * sizeof *opts->authkeys);
+    opts->authkeys = nc_realloc(opts->authkeys, opts->authkey_count * sizeof *opts->authkeys);
+    if (!opts->authkeys) {
+        ERRMEM;
+        return -1;
+    }
     opts->authkeys[opts->authkey_count - 1].path = lydict_insert(server_opts.ctx, pubkey_path, 0);
     opts->authkeys[opts->authkey_count - 1].username = lydict_insert(server_opts.ctx, username, 0);
 
@@ -607,7 +611,7 @@ nc_sshcb_auth_pubkey(struct nc_session *session, ssh_message msg)
         return;
 
     } else if (signature_state == SSH_PUBLICKEY_STATE_NONE) {
-        if ((username = auth_pubkey_compare_key(session->ti_opts, ssh_message_auth_pubkey(msg))) == NULL) {
+        if ((username = auth_pubkey_compare_key(session->data, ssh_message_auth_pubkey(msg))) == NULL) {
             VRB("User \"%s\" tried to use an unknown (unauthorized) public key.", session->username);
 
         } else if (strcmp(session->username, username)) {
@@ -681,6 +685,10 @@ nc_sshcb_channel_subsystem(struct nc_session *session, ssh_channel channel, cons
     } else {
         /* additional channel subsystem request, new session is ready as far as SSH is concerned */
         new_session = calloc(1, sizeof *new_session);
+        if (!new_session) {
+            ERRMEM;
+            return -1;
+        }
 
         /* insert the new session */
         if (!session->ti.libssh.next) {
@@ -846,7 +854,7 @@ nc_sshcb_msg(ssh_session UNUSED(sshsession), ssh_message msg, void *data)
             return 0;
         }
 
-        if (session->ssh_auth_attempts >= ((struct nc_server_ssh_opts *)session->ti_opts)->auth_attempts) {
+        if (session->ssh_auth_attempts >= ((struct nc_server_ssh_opts *)session->data)->auth_attempts) {
             /* too many failed attempts */
             ssh_message_reply_default(msg);
             return 0;
@@ -984,6 +992,7 @@ nc_open_netconf_channel(struct nc_session *session, int timeout)
 
         if ((timeout != -1) && (elapsed_usec / 1000 >= timeout)) {
             /* timeout */
+            ERR("Failed to start \"netconf\" SSH subsystem for too long, disconnecting.");
             break;
         }
 
@@ -1062,18 +1071,18 @@ nc_ssh_pollin(struct nc_session *session, int *timeout)
 }
 
 API int
-nc_connect_callhome_ssh(const char *host, uint16_t port, int timeout, struct nc_session **session)
+nc_connect_callhome_ssh(const char *host, uint16_t port, struct nc_session **session)
 {
-    return nc_connect_callhome(host, port, NC_TI_LIBSSH, timeout, session);
+    return nc_connect_callhome(host, port, NC_TI_LIBSSH, session);
 }
 
 int
-nc_accept_ssh_session(struct nc_session *session, int sock, int timeout)
+nc_accept_ssh_session(struct nc_session *session, int sock)
 {
     struct nc_server_ssh_opts *opts;
     int libssh_auth_methods = 0, elapsed_usec = 0, ret;
 
-    opts = session->ti_opts;
+    opts = session->data;
 
     /* other transport-specific data */
     session->ti_type = NC_TI_LIBSSH;
@@ -1129,19 +1138,16 @@ nc_accept_ssh_session(struct nc_session *session, int sock, int timeout)
 
         usleep(NC_TIMEOUT_STEP);
         elapsed_usec += NC_TIMEOUT_STEP;
-    } while ((timeout == -1) || (timeout && (elapsed_usec / 1000 < timeout)));
+    } while (!opts->auth_timeout || (elapsed_usec / 1000000 < opts->auth_timeout));
 
     if (!(session->flags & NC_SESSION_SSH_AUTHENTICATED)) {
         /* timeout */
+        ERR("Client failed to authenticate for too long, disconnecting.");
         return 0;
     }
 
-    if (timeout > 0) {
-        timeout -= elapsed_usec / 1000;
-    }
-
     /* open channel */
-    ret = nc_open_netconf_channel(session, timeout);
+    ret = nc_open_netconf_channel(session, opts->auth_timeout ? (opts->auth_timeout * 1000 - elapsed_usec / 1000) : -1);
     if (ret < 1) {
         return ret;
     }
@@ -1161,6 +1167,9 @@ nc_ps_accept_ssh_channel(struct nc_pollsession *ps, struct nc_session **session)
         ERRARG;
         return -1;
     }
+
+    /* LOCK */
+    pthread_mutex_lock(&ps->lock);
 
     for (i = 0; i < ps->session_count; ++i) {
         if ((ps->sessions[i]->status == NC_STATUS_RUNNING) && (ps->sessions[i]->ti_type == NC_TI_LIBSSH)
@@ -1183,6 +1192,9 @@ nc_ps_accept_ssh_channel(struct nc_pollsession *ps, struct nc_session **session)
         }
     }
 
+    /* UNLOCK */
+    pthread_mutex_unlock(&ps->lock);
+
     if (!new_session) {
         ERR("No session with a NETCONF SSH channel ready was found.");
         return -1;
@@ -1197,6 +1209,7 @@ nc_ps_accept_ssh_channel(struct nc_pollsession *ps, struct nc_session **session)
     if (nc_handshake(new_session)) {
         return -1;
     }
+
     new_session->status = NC_STATUS_RUNNING;
     *session = new_session;
 

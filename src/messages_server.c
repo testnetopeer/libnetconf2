@@ -44,11 +44,6 @@ nc_server_reply_data(struct lyd_node *data, NC_PARAMTYPE paramtype)
 {
     struct nc_server_reply_data *ret;
 
-    if (!data) {
-        ERRARG;
-        return NULL;
-    }
-
     ret = malloc(sizeof *ret);
     if (!ret) {
         ERRMEM;
@@ -56,7 +51,7 @@ nc_server_reply_data(struct lyd_node *data, NC_PARAMTYPE paramtype)
     }
 
     ret->type = NC_RPL_DATA;
-    if (paramtype == NC_PARAMTYPE_DUP_AND_FREE) {
+    if (data && (paramtype == NC_PARAMTYPE_DUP_AND_FREE)) {
         ret->data = lyd_dup(data, 1);
     } else {
         ret->data = data;
@@ -87,6 +82,11 @@ nc_server_reply_err(struct nc_server_error *err)
 
     ret->type = NC_RPL_ERROR;
     ret->err = malloc(sizeof *ret->err);
+    if (!ret->err) {
+        ERRMEM;
+        free(ret);
+        return NULL;
+    }
     ret->err[0] = err;
     ret->count = 1;
     return (struct nc_server_reply *)ret;
@@ -104,7 +104,11 @@ nc_server_reply_add_err(struct nc_server_reply *reply, struct nc_server_error *e
 
     err_rpl = (struct nc_server_reply_error *)reply;
     ++err_rpl->count;
-    err_rpl->err = realloc(err_rpl->err, err_rpl->count * sizeof *err_rpl->err);
+    err_rpl->err = nc_realloc(err_rpl->err, err_rpl->count * sizeof *err_rpl->err);
+    if (!err_rpl->err) {
+        ERRMEM;
+        return -1;
+    }
     err_rpl->err[err_rpl->count - 1] = err;
     return 0;
 }
@@ -368,7 +372,11 @@ nc_err_add_bad_attr(struct nc_server_error *err, const char *attr_name)
     }
 
     ++err->attr_count;
-    err->attr = realloc(err->attr, err->attr_count * sizeof *err->attr);
+    err->attr = nc_realloc(err->attr, err->attr_count * sizeof *err->attr);
+    if (!err->attr) {
+        ERRMEM;
+        return -1;
+    }
     err->attr[err->attr_count - 1] = lydict_insert(server_opts.ctx, attr_name, 0);
 
     return 0;
@@ -383,7 +391,11 @@ nc_err_add_bad_elem(struct nc_server_error *err, const char *elem_name)
     }
 
     ++err->elem_count;
-    err->elem = realloc(err->elem, err->elem_count * sizeof *err->elem);
+    err->elem = nc_realloc(err->elem, err->elem_count * sizeof *err->elem);
+    if (!err->elem) {
+        ERRMEM;
+        return -1;
+    }
     err->elem[err->elem_count - 1] = lydict_insert(server_opts.ctx, elem_name, 0);
 
     return 0;
@@ -398,7 +410,11 @@ nc_err_add_bad_ns(struct nc_server_error *err, const char *ns_name)
     }
 
     ++err->ns_count;
-    err->ns = realloc(err->ns, err->ns_count * sizeof *err->ns);
+    err->ns = nc_realloc(err->ns, err->ns_count * sizeof *err->ns);
+    if (!err->ns) {
+        ERRMEM;
+        return -1;
+    }
     err->ns[err->ns_count - 1] = lydict_insert(server_opts.ctx, ns_name, 0);
 
     return 0;
@@ -413,7 +429,11 @@ nc_err_add_info_other(struct nc_server_error *err, struct lyxml_elem *other)
     }
 
     ++err->other_count;
-    err->other = realloc(err->other, err->other_count * sizeof *err->other);
+    err->other = nc_realloc(err->other, err->other_count * sizeof *err->other);
+    if (!err->other) {
+        ERRMEM;
+        return -1;
+    }
     err->other[err->other_count - 1] = other;
     return 0;
 }

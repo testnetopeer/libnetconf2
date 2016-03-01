@@ -42,11 +42,16 @@ typedef struct nc_server_reply *(*nc_rpc_clb)(struct lyd_node *rpc, struct nc_se
 void nc_session_set_term_reason(struct nc_session *session, NC_SESSION_TERM_REASON reason);
 
 /**
- * @brief Initialize the server using a libyang context.
+ * @brief Initialize libssh and/or libssl/libcrypto and the server using a libyang context.
  *
  * The context is not modified internally, only its dictionary is used for holding
  * all the strings, which is thread-safe. Reading models is considered thread-safe
  * as models cannot be removed and are rarely modified (augments or deviations).
+ *
+ * If the callbacks on schema nodes (their private data) are modified after
+ * server initialization with that particular context, they will be called (changes
+ * will take effect). However, there could be race conditions as the access to
+ * these callbacks is not thread-safe.
  *
  * Server capabilities are generated based on its content. Changing the context
  * in ways that result in changed capabilities (adding models, changing features)
@@ -68,7 +73,8 @@ void nc_session_set_term_reason(struct nc_session *session, NC_SESSION_TERM_REAS
 int nc_server_init(struct ly_ctx *ctx);
 
 /**
- * @brief Destroy any dynamically allocated server resources.
+ * @brief Destroy any dynamically allocated libssh and/or libssl/libcrypto and
+ *        server resources.
  */
 void nc_server_destroy(void);
 
@@ -160,6 +166,14 @@ int nc_ps_add_session(struct nc_pollsession *ps, struct nc_session *session);
 int nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session);
 
 /**
+ * @brief Learn the number of sessions in a pollsession structure.
+ *
+ * @param[in] ps Pollsession structure to check.
+ * @return Number of sessions (even invalid ones) in \p ps.
+ */
+uint16_t nc_ps_session_count(struct nc_pollsession *ps);
+
+/**
  * @brief Poll sessions and process any received RPCs.
  *
  * All the sessions must be running. If a session fails causing it to change its
@@ -178,20 +192,22 @@ int nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session);
  *
  *         Only with SSH support:
  *         4 if an SSH message was processed,
- *         5 if a new NETCONF SSH channel was created; call #nc_ps_accept_ssh_channel
+ *         5 if a new NETCONF SSH channel was created; call nc_ps_accept_ssh_channel()
  *           to establish a new NETCONF session.
  */
 int nc_ps_poll(struct nc_pollsession *ps, int timeout);
 
 /**
- * @brief Remove invalid sessions from a pollsession structure and
- *        call #nc_session_free() on them.
+ * @brief Remove sessions from a pollsession structure and
+ *        call nc_session_free() on them.
  *
- * Calling this function makes sense if #nc_ps_poll() returned 3.
+ * Calling this function with \p all false makes sense if nc_ps_poll() returned 3.
  *
  * @param[in] ps Pollsession structure to clear.
+ * @param[in] all Whether to free all sessions, or only the invalid ones.
+ * @param[in] data_free Session user data destructor.
  */
-void nc_ps_clear(struct nc_pollsession *ps);
+void nc_ps_clear(struct nc_pollsession *ps, int all, void (*data_free)(void *));
 
 #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
 
@@ -212,6 +228,7 @@ int nc_accept(int timeout, struct nc_session **session);
 /**
  * @brief Accept a new NETCONF session on an SSH session of a running NETCONF session
  *        that was polled in \p ps. Call this function only when nc_ps_poll() on \p ps returns 5.
+ *        The new session is only returned in \p session, it is not added to \p ps.
  *
  * @param[in] ps Unmodified pollsession structure from the previous nc_ps_poll() call.
  * @param[out] session New session.
@@ -420,7 +437,7 @@ int nc_server_tls_endpt_set_key_path(const char *endpt_name, const char *privkey
 
 /**
  * @brief Add a trusted certificate. Can be both a CA or a client one. Can be
- *        safely used together with #nc_server_tls_endpt_set_trusted_ca_paths().
+ *        safely used together with nc_server_tls_endpt_set_trusted_ca_paths().
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] cert Base64-enocded certificate in ASN.1 DER encoding.
@@ -430,7 +447,7 @@ int nc_server_tls_endpt_add_trusted_cert(const char *endpt_name, const char *cer
 
 /**
  * @brief Add a trusted certificate. Can be both a CA or a client one. Can be
- *        safely used together with #nc_server_tls_endpt_set_trusted_ca_paths().
+ *        safely used together with nc_server_tls_endpt_set_trusted_ca_paths().
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] cert_path Path to a trusted certificate file in PEM format.
@@ -441,7 +458,7 @@ int nc_server_tls_endpt_add_trusted_cert_path(const char *endpt_name, const char
 /**
  * @brief Set trusted Certificate Authority certificate locations. There can only be
  *        one file and one directory, they are replaced if already set. Can be safely
- *        used with #nc_server_tls_endpt_add_trusted_cert() or its _path variant.
+ *        used with nc_server_tls_endpt_add_trusted_cert() or its _path variant.
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] ca_file Path to a trusted CA cert store file in PEM format. Can be NULL.

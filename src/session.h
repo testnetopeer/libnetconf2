@@ -157,10 +157,27 @@ const char **nc_session_get_cpblts(const struct nc_session *session);
 const char *nc_session_cpblt(const struct nc_session *session, const char *capab);
 
 /**
+ * @brief Assign arbitrary data to a session.
+ *
+ * @param[in] session Session to modify.
+ * @param[in] data Data to be stored in the session.
+ */
+void nc_session_set_data(struct nc_session *session, void *data);
+
+/**
+ * @brief Get the data assigned to a session.
+ *
+ * @param[in] session Session to get the data from.
+ * @return Session-specific data.
+ */
+void *nc_session_get_data(const struct nc_session *session);
+
+/**
  * @brief Free the NETCONF session object.
  *
  * @param[in] session Object to free.
+ * @param[in] data_free Session user data destructor.
  */
-void nc_session_free(struct nc_session *session);
+void nc_session_free(struct nc_session *session, void (*data_free)(void *));
 
 #endif /* NC_SESSION_H_ */

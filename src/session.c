@@ -212,6 +212,28 @@ nc_session_cpblt(const struct nc_session *session, const char *capab)
     return NULL;
 }
 
+API void
+nc_session_set_data(struct nc_session *session, void *data)
+{
+    if (!session) {
+        ERRARG;
+        return;
+    }
+
+    session->data = data;
+}
+
+API void *
+nc_session_get_data(const struct nc_session *session)
+{
+    if (!session) {
+        ERRARG;
+        return NULL;
+    }
+
+    return session->data;
+}
+
 NC_MSG_TYPE
 nc_send_msg(struct nc_session *session, struct lyd_node *op)
 {
@@ -233,7 +255,7 @@ nc_send_msg(struct nc_session *session, struct lyd_node *op)
 }
 
 API void
-nc_session_free(struct nc_session *session)
+nc_session_free(struct nc_session *session, void (*data_free)(void *))
 {
     int r, i;
     int connected; /* flag to indicate whether the transport socket is still connected */
@@ -327,6 +349,10 @@ nc_session_free(struct nc_session *session)
             }
             free(session->cpblts);
         }
+    }
+
+    if (session->data && data_free) {
+        data_free(session->data);
     }
 
     session->status = NC_STATUS_CLOSING;
@@ -448,7 +474,11 @@ add_cpblt(struct ly_ctx *ctx, const char *capab, const char ***cpblts, int *size
 {
     if (*count == *size) {
         *size += 5;
-        *cpblts = realloc(*cpblts, *size * sizeof **cpblts);
+        *cpblts = nc_realloc(*cpblts, *size * sizeof **cpblts);
+        if (!(*cpblts)) {
+            ERRMEM;
+            return;
+        }
     }
 
     if (capab) {
@@ -475,6 +505,10 @@ create_cpblts(struct ly_ctx *ctx)
     }
 
     cpblts = malloc(size * sizeof *cpblts);
+    if (!cpblts) {
+        ERRMEM;
+        return NULL;
+    }
     cpblts[0] = lydict_insert(ctx, "urn:ietf:params:netconf:base:1.0", 0);
     cpblts[1] = lydict_insert(ctx, "urn:ietf:params:netconf:base:1.1", 0);
     count = 2;
@@ -560,7 +594,6 @@ create_cpblts(struct ly_ctx *ctx)
     }
 
     /* models */
-
     LY_TREE_FOR(yanglib->child, child) {
         if (!strcmp(child->schema->name, "module")) {
             LY_TREE_FOR(child->child, child2) {
@@ -571,7 +604,12 @@ create_cpblts(struct ly_ctx *ctx)
                 } else if (!strcmp(child2->schema->name, "revision")) {
                     rev = (struct lyd_node_leaf_list *)child2;
                 } else if (!strcmp(child2->schema->name, "feature")) {
-                    features = realloc(features, feat_count++ * sizeof *features);
+                    features = nc_realloc(features, ++feat_count * sizeof *features);
+                    if (!features) {
+                        ERRMEM;
+                        free(cpblts);
+                        return NULL;
+                    }
                     features[feat_count - 1] = (struct lyd_node_leaf_list *)child2;
                 }
             }
@@ -678,6 +716,10 @@ nc_send_client_hello(struct nc_session *session)
 
     /* client side hello - send only NETCONF base capabilities */
     cpblts = malloc(3 * sizeof *cpblts);
+    if (!cpblts) {
+        ERRMEM;
+        return NC_MSG_ERROR;
+    }
     cpblts[0] = lydict_insert(session->ctx, "urn:ietf:params:netconf:base:1.0", 0);
     cpblts[1] = lydict_insert(session->ctx, "urn:ietf:params:netconf:base:1.1", 0);
     cpblts[2] = NULL;
@@ -877,7 +919,7 @@ nc_handshake(struct nc_session *session)
 
 #ifdef NC_ENABLED_SSH
 
-API void
+static void
 nc_ssh_init(void)
 {
     ssh_threads_set_callbacks(ssh_threads_get_pthread());
@@ -885,9 +927,10 @@ nc_ssh_init(void)
     ssh_set_log_level(verbose_level);
 }
 
-API void
+static void
 nc_ssh_destroy(void)
 {
+    FIPS_mode_set(0);
     ENGINE_cleanup();
     CONF_modules_unload(1);
     nc_thread_destroy();
@@ -898,27 +941,9 @@ nc_ssh_destroy(void)
 
 #ifdef NC_ENABLED_TLS
 
-static pthread_mutex_t *tls_locks;
-
 struct CRYPTO_dynlock_value {
     pthread_mutex_t lock;
 };
-
-static void
-tls_thread_locking_func(int mode, int n, const char *UNUSED(file), int UNUSED(line))
-{
-    if (mode & CRYPTO_LOCK) {
-        pthread_mutex_lock(tls_locks + n);
-    } else {
-        pthread_mutex_unlock(tls_locks + n);
-    }
-}
-
-static void
-tls_thread_id_func(CRYPTO_THREADID *tid)
-{
-    CRYPTO_THREADID_set_numeric(tid, (unsigned long)pthread_self());
-}
 
 static struct CRYPTO_dynlock_value *
 tls_dyn_create_func(const char *UNUSED(file), int UNUSED(line))
@@ -954,7 +979,29 @@ tls_dyn_destroy_func(struct CRYPTO_dynlock_value *l, const char *UNUSED(file), i
     free(l);
 }
 
-API void
+#endif /* NC_ENABLED_TLS */
+
+#if defined(NC_ENABLED_TLS) && !defined(NC_ENABLED_SSH)
+
+static pthread_mutex_t *tls_locks;
+
+static void
+tls_thread_locking_func(int mode, int n, const char *UNUSED(file), int UNUSED(line))
+{
+    if (mode & CRYPTO_LOCK) {
+        pthread_mutex_lock(tls_locks + n);
+    } else {
+        pthread_mutex_unlock(tls_locks + n);
+    }
+}
+
+static void
+tls_thread_id_func(CRYPTO_THREADID *tid)
+{
+    CRYPTO_THREADID_set_numeric(tid, (unsigned long)pthread_self());
+}
+
+static void
 nc_tls_init(void)
 {
     int i;
@@ -964,6 +1011,10 @@ nc_tls_init(void)
     SSL_library_init();
 
     tls_locks = malloc(CRYPTO_num_locks() * sizeof *tls_locks);
+    if (!tls_locks) {
+        ERRMEM;
+        return;
+    }
     for (i = 0; i < CRYPTO_num_locks(); ++i) {
         pthread_mutex_init(tls_locks + i, NULL);
     }
@@ -976,11 +1027,12 @@ nc_tls_init(void)
     CRYPTO_set_dynlock_destroy_callback(tls_dyn_destroy_func);
 }
 
-API void
+static void
 nc_tls_destroy(void)
 {
     int i;
 
+    FIPS_mode_set(0);
     CRYPTO_cleanup_all_ex_data();
     nc_thread_destroy();
     EVP_cleanup();
@@ -999,26 +1051,11 @@ nc_tls_destroy(void)
     CRYPTO_set_dynlock_destroy_callback(NULL);
 }
 
-#endif /* NC_ENABLED_TLS */
-
-#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
-
-API void
-nc_thread_destroy(void) {
-    CRYPTO_THREADID crypto_tid;
-
-    /* caused data-races and seems not neccessary for avoiding valgrind reachable memory */
-    //CRYPTO_cleanup_all_ex_data();
-
-    CRYPTO_THREADID_current(&crypto_tid);
-    ERR_remove_thread_state(&crypto_tid);
-}
-
-#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
+#endif /* NC_ENABLED_TLS && !NC_ENABLED_SSH */
 
 #if defined(NC_ENABLED_SSH) && defined(NC_ENABLED_TLS)
 
-API void
+static void
 nc_ssh_tls_init(void)
 {
     SSL_load_error_strings();
@@ -1032,7 +1069,7 @@ nc_ssh_tls_init(void)
     CRYPTO_set_dynlock_destroy_callback(tls_dyn_destroy_func);
 }
 
-API void
+static void
 nc_ssh_tls_destroy(void)
 {
     ERR_free_strings();
@@ -1046,3 +1083,43 @@ nc_ssh_tls_destroy(void)
 }
 
 #endif /* NC_ENABLED_SSH && NC_ENABLED_TLS */
+
+#if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
+
+API void
+nc_thread_destroy(void)
+{
+    CRYPTO_THREADID crypto_tid;
+
+    /* caused data-races and seems not neccessary for avoiding valgrind reachable memory */
+    //CRYPTO_cleanup_all_ex_data();
+
+    CRYPTO_THREADID_current(&crypto_tid);
+    ERR_remove_thread_state(&crypto_tid);
+}
+
+#endif /* NC_ENABLED_SSH || NC_ENABLED_TLS */
+
+void
+nc_init(void)
+{
+#if defined(NC_ENABLED_SSH) && defined(NC_ENABLED_TLS)
+    nc_ssh_tls_init();
+#elif defined(NC_ENABLED_SSH)
+    nc_ssh_init();
+#elif defined(NC_ENABLED_TLS)
+    nc_tls_init();
+#endif
+}
+
+void
+nc_destroy(void)
+{
+#if defined(NC_ENABLED_SSH) && defined(NC_ENABLED_TLS)
+    nc_ssh_tls_destroy();
+#elif defined(NC_ENABLED_SSH)
+    nc_ssh_destroy();
+#elif defined(NC_ENABLED_TLS)
+    nc_tls_destroy();
+#endif
+}

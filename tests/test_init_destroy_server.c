@@ -1,7 +1,7 @@
 /**
- * \file test_init_destroy_tls.c
+ * \file test_init_destroy_server.c
  * \author Michal Vasko <mvasko@cesnet.cz>
- * \brief libnetconf2 tests - libssl/libcrypto init/destroy
+ * \brief libnetconf2 tests - init/destroy server
  *
  * Copyright (c) 2015 CESNET, z.s.p.o.
  *
@@ -30,24 +30,30 @@
 #include <libyang/libyang.h>
 
 #include "config.h"
-#include <netconf.h>
+#include <session_server.h>
+
+struct ly_ctx *ctx;
 
 static int
-setup_tls(void **state)
+setup_server(void **state)
 {
     (void)state;
 
-    nc_tls_init();
+    ctx = ly_ctx_new(NULL);
+    assert_non_null(ctx);
+
+    nc_server_init(ctx);
 
     return 0;
 }
 
 static int
-teardown_tls(void **state)
+teardown_server(void **state)
 {
     (void)state;
 
-    nc_tls_destroy();
+    nc_server_destroy();
+    ly_ctx_destroy(ctx, NULL);
 
     return 0;
 }
@@ -62,7 +68,7 @@ int
 main(void)
 {
     const struct CMUnitTest init_destroy[] = {
-        cmocka_unit_test_setup_teardown(test_dummy, setup_tls, teardown_tls)
+        cmocka_unit_test_setup_teardown(test_dummy, setup_server, teardown_server)
     };
 
     return cmocka_run_group_tests(init_destroy, NULL, NULL);

@@ -240,6 +240,7 @@ struct nc_session {
 
     /* other */
     struct ly_ctx *ctx;            /**< libyang context of the session */
+    void *data;                    /**< arbitrary user data */
     uint8_t flags;                 /**< various flags of the session - TODO combine with status and/or side */
 #define NC_SESSION_SHAREDCTX 0x01
 #define NC_SESSION_CALLHOME 0x02
@@ -251,7 +252,6 @@ struct nc_session {
     struct nc_msg_cont *notifs;    /**< queue for notifications received instead of RPC reply */
 
     /* server side only data */
-    void *ti_opts;
     time_t last_rpc;               /**< time the last RPC was received on this session */
 #ifdef NC_ENABLED_SSH
     /* SSH session authenticated */
@@ -270,16 +270,20 @@ struct nc_session {
 #endif
 };
 
+/* ACCESS locked */
 struct nc_pollsession {
     struct pollfd *pfds;
     struct nc_session **sessions;
     uint16_t session_count;
+    pthread_mutex_t lock;
 };
 
 struct nc_ntf_thread_arg {
     struct nc_session *session;
     void (*notif_clb)(struct nc_session *session, const struct nc_notif *notif);
 };
+
+void *nc_realloc(void *ptr, size_t size);
 
 NC_MSG_TYPE nc_send_msg(struct nc_session *session, struct lyd_node *op);
 
@@ -420,11 +424,14 @@ int nc_client_ch_del_bind(const char *address, uint16_t port, NC_TRANSPORT_IMPL 
  * @param[in] host Hostname to connect to.
  * @param[in] port Port to connect to.
  * @param[in] ti Transport fo the connection.
- * @param[in] timeout Timeout.
  * @param[out] session New Call Home session.
  * @return 0 on success, -1 on error.
  */
-int nc_connect_callhome(const char *host, uint16_t port, NC_TRANSPORT_IMPL ti, int timeout, struct nc_session **session);
+int nc_connect_callhome(const char *host, uint16_t port, NC_TRANSPORT_IMPL ti, struct nc_session **session);
+
+void nc_init(void);
+
+void nc_destroy(void);
 
 #ifdef NC_ENABLED_SSH
 
@@ -444,11 +451,10 @@ struct nc_session *nc_accept_callhome_ssh_sock(int sock, const char *host, uint1
  *
  * @param[in] session Session structure of the new connection.
  * @param[in] sock Socket of the new connection.
- * @param[in] timeout Timeout for all the related tasks.
  * @param[in] ch Whether to accept a Call Home session or a standard one.
  * @return 1 on success, 0 on timeout, -1 on error.
  */
-int nc_accept_ssh_session(struct nc_session *session, int sock, int timeout);
+int nc_accept_ssh_session(struct nc_session *session, int sock);
 
 /**
  * @brief Callback called when a new SSH message is received.
@@ -491,11 +497,10 @@ struct nc_session *nc_accept_callhome_tls_sock(int sock, const char *host, uint1
  *
  * @param[in] session Session structure of the new connection.
  * @param[in] sock Socket of the new connection.
- * @param[in] timeout Timeout for all the related tasks.
  * @param[in] ch Whether to accept a Call Home session or a standard one.
  * @return 1 on success, 0 on timeout, -1 on error.
  */
-int nc_accept_tls_session(struct nc_session *session, int sock, int timeout);
+int nc_accept_tls_session(struct nc_session *session, int sock);
 
 void nc_server_tls_clear_opts(struct nc_server_tls_opts *opts);
 
