@@ -51,29 +51,18 @@ extern struct nc_server_opts server_opts;
  *        -1 - error
  */
 int
-nc_timedlock(pthread_mutex_t *lock, int timeout, int *elapsed)
+nc_timedlock(pthread_mutex_t *lock, int timeout)
 {
     int ret;
-    struct timespec ts_timeout, ts_old, ts_new;
+    struct timespec ts_timeout;
 
     if (timeout > 0) {
         clock_gettime(CLOCK_REALTIME, &ts_timeout);
-
-        if (elapsed) {
-            ts_old = ts_timeout;
-        }
 
         ts_timeout.tv_sec += timeout / 1000;
         ts_timeout.tv_nsec += (timeout % 1000) * 1000000;
 
         ret = pthread_mutex_timedlock(lock, &ts_timeout);
-
-        if (elapsed) {
-            clock_gettime(CLOCK_REALTIME, &ts_new);
-
-            *elapsed += (ts_new.tv_sec - ts_old.tv_sec) * 1000;
-            *elapsed += (ts_new.tv_nsec - ts_old.tv_nsec) / 1000000;
-        }
     } else if (!timeout) {
         ret = pthread_mutex_trylock(lock);
     } else { /* timeout == -1 */
@@ -85,7 +74,7 @@ nc_timedlock(pthread_mutex_t *lock, int timeout, int *elapsed)
         return 0;
     } else if (ret) {
         /* error */
-        ERR("Mutex lock failed (%s).", strerror(errno));
+        ERR("Mutex lock failed (%s).", strerror(ret));
         return -1;
     }
 
@@ -257,7 +246,7 @@ nc_send_msg(struct nc_session *session, struct lyd_node *op)
 API void
 nc_session_free(struct nc_session *session, void (*data_free)(void *))
 {
-    int r, i;
+    int r, i, locked;
     int connected; /* flag to indicate whether the transport socket is still connected */
     int multisession = 0; /* flag for more NETCONF sessions on a single SSH session */
     pthread_t tid;
@@ -272,14 +261,6 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
         return;
     }
 
-    /* mark session for closing */
-    if (session->ti_lock) {
-        r = nc_timedlock(session->ti_lock, -1, NULL);
-        if (r == -1) {
-            return;
-        }
-    }
-
     /* stop notifications loop if any */
     if (session->ntf_tid) {
         tid = *session->ntf_tid;
@@ -290,7 +271,19 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
         pthread_join(tid, NULL);
     }
 
-    if ((session->side == NC_CLIENT) && (session->status == NC_STATUS_RUNNING)) {
+    if (session->ti_lock) {
+        r = nc_timedlock(session->ti_lock, NC_READ_TIMEOUT * 1000);
+        if (r == -1) {
+            return;
+        } else if (!r) {
+            /* we failed to lock it, too bad */
+            locked = 0;
+        } else {
+            locked = 1;
+        }
+    }
+
+    if ((session->side == NC_CLIENT) && (session->status == NC_STATUS_RUNNING) && locked) {
         /* cleanup message queues */
         /* notifications */
         for (contiter = session->notifs; contiter; ) {
@@ -355,6 +348,7 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
         data_free(session->data);
     }
 
+    /* mark session for closing */
     session->status = NC_STATUS_CLOSING;
     connected = nc_session_is_connected(session);
 
@@ -455,7 +449,9 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
 
     /* final cleanup */
     if (session->ti_lock) {
-        pthread_mutex_unlock(session->ti_lock);
+        if (locked) {
+            pthread_mutex_unlock(session->ti_lock);
+        }
         if (!multisession) {
             pthread_mutex_destroy(session->ti_lock);
             free(session->ti_lock);

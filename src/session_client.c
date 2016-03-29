@@ -38,7 +38,7 @@ static const char *ncds2str[] = {NULL, "config", "url", "running", "startup", "c
 struct nc_client_opts client_opts;
 
 API int
-nc_client_schema_searchpath(const char *path)
+nc_client_set_schema_searchpath(const char *path)
 {
     if (client_opts.schema_searchpath) {
         free(client_opts.schema_searchpath);
@@ -55,6 +55,12 @@ nc_client_schema_searchpath(const char *path)
     }
 
     return 0;
+}
+
+API const char *
+nc_client_get_schema_searchpath(void)
+{
+    return client_opts.schema_searchpath;
 }
 
 /* SCHEMAS_DIR not used (implicitly) */
@@ -186,7 +192,7 @@ ctx_check_and_load_ietf_netconf(struct ly_ctx *ctx, const char **cpblts)
 
 static char *
 libyang_module_clb(const char *name, const char *revision, void *user_data, LYS_INFORMAT *format,
-                   void (**free_model_data)(char *model_data))
+                   void (**free_model_data)(void *model_data))
 {
     struct nc_session *session = (struct nc_session *)user_data;
     struct nc_rpc *rpc;
@@ -229,7 +235,7 @@ libyang_module_clb(const char *name, const char *revision, void *user_data, LYS_
     data_rpl = (struct nc_reply_data *)reply;
     lyxml_print_mem(&anyxml, ((struct lyd_node_anyxml *)data_rpl->data)->value, 0);
     nc_reply_free(reply);
-    *free_model_data = NULL;
+    *free_model_data = free;
 
     /* it's with the data root node, remove it */
     if (anyxml) {
@@ -268,7 +274,7 @@ nc_ctx_check_and_fill(struct nc_session *session)
         if (lys_parse_path(session->ctx, SCHEMAS_DIR"/ietf-netconf-monitoring.yin", LYS_IN_YIN)) {
             /* set module retrieval using <get-schema> */
             old_clb = ly_ctx_get_module_clb(session->ctx, &old_data);
-            ly_ctx_set_module_clb(session->ctx, &libyang_module_clb, session);
+            ly_ctx_set_module_clb(session->ctx, libyang_module_clb, session);
         } else {
             WRN("Loading NETCONF monitoring schema failed, cannot use <get-schema>.");
         }
@@ -351,6 +357,11 @@ nc_connect_inout(int fdin, int fdout, struct ly_ctx *ctx)
     /* assign context (dicionary needed for handshake) */
     if (!ctx) {
         ctx = ly_ctx_new(SCHEMAS_DIR);
+        /* definitely should not happen, but be ready */
+        if (!ctx && !(ctx = ly_ctx_new(NULL))) {
+            /* that's just it */
+            goto fail;
+        }
     } else {
         session->flags |= NC_SESSION_SHAREDCTX;
     }
@@ -437,7 +448,7 @@ errloop:
 static NC_MSG_TYPE
 get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_elem **msg)
 {
-    int r, elapsed = 0;
+    int r;
     char *ptr;
     const char *str_msgid;
     uint64_t cur_msgid;
@@ -445,16 +456,13 @@ get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_el
     struct nc_msg_cont *cont, **cont_ptr;
     NC_MSG_TYPE msgtype = 0; /* NC_MSG_ERROR */
 
-    r = nc_timedlock(session->ti_lock, timeout, &elapsed);
+    r = nc_timedlock(session->ti_lock, timeout);
     if (r == -1) {
         /* error */
         return NC_MSG_ERROR;
     } else if (!r) {
         /* timeout */
         return NC_MSG_WOULDBLOCK;
-    }
-    if (timeout > 0) {
-        timeout -= elapsed;
     }
 
     /* try to get notification from the session's queue */
@@ -842,7 +850,7 @@ parse_reply(struct ly_ctx *ctx, struct lyxml_elem *xml, struct nc_rpc *rpc, int 
             break;
 
         case NC_RPC_GETSCHEMA:
-            schema = ly_ctx_get_node(ctx, "/ietf-netconf-monitoring:get-schema");
+            schema = ly_ctx_get_node(ctx, NULL, "/ietf-netconf-monitoring:get-schema");
             if (!schema) {
                 ERRINT;
                 return NULL;
@@ -1018,7 +1026,7 @@ nc_client_init(void)
 API void
 nc_client_destroy(void)
 {
-    nc_client_schema_searchpath(NULL);
+    nc_client_set_schema_searchpath(NULL);
 #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
     nc_client_ch_del_bind(NULL, 0, 0);
 #endif
@@ -1216,7 +1224,7 @@ nc_send_rpc(struct nc_session *session, struct nc_rpc *rpc, int timeout, uint64_
     struct nc_rpc_getschema *rpc_gs;
     struct nc_rpc_subscribe *rpc_sub;
     struct lyd_node *data, *node;
-    const struct lys_module *ietfnc, *ietfncmon, *notifs, *ietfncwd = NULL;
+    const struct lys_module *ietfnc = NULL, *ietfncmon, *notifs, *ietfncwd = NULL;
     char str[11];
     uint64_t cur_msgid;
 
@@ -1258,13 +1266,13 @@ nc_send_rpc(struct nc_session *session, struct nc_rpc *rpc, int timeout, uint64_
             return NC_MSG_ERROR;
         }
         if (rpc_gc->filter) {
-            if (rpc_gc->filter[0] == '<') {
+            if (!rpc_gc->filter[0] || (rpc_gc->filter[0] == '<')) {
                 node = lyd_new_anyxml(data, ietfnc, "filter", rpc_gc->filter);
-                lyd_insert_attr(node, "type", "subtree");
+                lyd_insert_attr(node, NULL, "type", "subtree");
             } else {
                 node = lyd_new_anyxml(data, ietfnc, "filter", NULL);
-                lyd_insert_attr(node, "type", "xpath");
-                lyd_insert_attr(node, "select", rpc_gc->filter);
+                lyd_insert_attr(node, NULL, "type", "xpath");
+                lyd_insert_attr(node, NULL, "select", rpc_gc->filter);
             }
             if (!node) {
                 lyd_free(data);
@@ -1457,13 +1465,13 @@ nc_send_rpc(struct nc_session *session, struct nc_rpc *rpc, int timeout, uint64_
 
         data = lyd_new(NULL, ietfnc, "get");
         if (rpc_g->filter) {
-            if (rpc_g->filter[0] == '<') {
+            if (!rpc_g->filter[0] || (rpc_g->filter[0] == '<')) {
                 node = lyd_new_anyxml(data, ietfnc, "filter", rpc_g->filter);
-                lyd_insert_attr(node, "type", "subtree");
+                lyd_insert_attr(node, NULL, "type", "subtree");
             } else {
                 node = lyd_new_anyxml(data, ietfnc, "filter", NULL);
-                lyd_insert_attr(node, "type", "xpath");
-                lyd_insert_attr(node, "select", rpc_g->filter);
+                lyd_insert_attr(node, NULL, "type", "xpath");
+                lyd_insert_attr(node, NULL, "select", rpc_g->filter);
             }
             if (!node) {
                 lyd_free(data);
@@ -1628,13 +1636,13 @@ nc_send_rpc(struct nc_session *session, struct nc_rpc *rpc, int timeout, uint64_
         }
 
         if (rpc_sub->filter) {
-            if (rpc_sub->filter[0] == '<') {
+            if (!rpc_sub->filter[0] || (rpc_sub->filter[0] == '<')) {
                 node = lyd_new_anyxml(data, notifs, "filter", rpc_sub->filter);
-                lyd_insert_attr(node, "type", "subtree");
+                lyd_insert_attr(node, NULL, "type", "subtree");
             } else {
                 node = lyd_new_anyxml(data, notifs, "filter", NULL);
-                lyd_insert_attr(node, "type", "xpath");
-                lyd_insert_attr(node, "select", rpc_sub->filter);
+                lyd_insert_attr(node, NULL, "type", "xpath");
+                lyd_insert_attr(node, NULL, "select", rpc_sub->filter);
             }
             if (!node) {
                 lyd_free(data);
@@ -1663,12 +1671,12 @@ nc_send_rpc(struct nc_session *session, struct nc_rpc *rpc, int timeout, uint64_
         return NC_MSG_ERROR;
     }
 
-    if (lyd_validate(data, LYD_OPT_STRICT)) {
+    if (lyd_validate(&data, LYD_OPT_STRICT)) {
         lyd_free(data);
         return NC_MSG_ERROR;
     }
 
-    ret = nc_timedlock(session->ti_lock, timeout, NULL);
+    ret = nc_timedlock(session->ti_lock, timeout);
     if (ret == -1) {
         /* error */
         r = NC_MSG_ERROR;

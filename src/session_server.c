@@ -317,7 +317,7 @@ nc_clb_default_get_schema(struct lyd_node *rpc, struct nc_session *UNUSED(sessio
         return nc_server_reply_err(err);
     }
 
-    sdata = ly_ctx_get_node(server_opts.ctx, "/ietf-netconf-monitoring:get-schema/output/data");
+    sdata = ly_ctx_get_node(server_opts.ctx, NULL, "/ietf-netconf-monitoring:get-schema/output/data");
     if (model_data && sdata) {
         data = lyd_output_new_anyxml(sdata, model_data);
     }
@@ -350,13 +350,13 @@ nc_server_init(struct ly_ctx *ctx)
     nc_init();
 
     /* set default <get-schema> callback if not specified */
-    rpc = ly_ctx_get_node(ctx, "/ietf-netconf-monitoring:get-schema");
+    rpc = ly_ctx_get_node(ctx, NULL, "/ietf-netconf-monitoring:get-schema");
     if (rpc && !rpc->priv) {
         lys_set_private(rpc, nc_clb_default_get_schema);
     }
 
     /* set default <close-session> callback if not specififed */
-    rpc = ly_ctx_get_node(ctx, "/ietf-netconf:close-session");
+    rpc = ly_ctx_get_node(ctx, NULL, "/ietf-netconf:close-session");
     if (rpc && !rpc->priv) {
         lys_set_private(rpc, nc_clb_default_close_session);
     }
@@ -546,12 +546,17 @@ nc_ps_add_session(struct nc_pollsession *ps, struct nc_session *session)
 }
 
 static int
-_nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session)
+_nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session, int index)
 {
     uint16_t i;
 
+    if (index >= 0) {
+        i = (uint16_t)index;
+        goto remove;
+    }
     for (i = 0; i < ps->session_count; ++i) {
         if (ps->sessions[i] == session) {
+remove:
             --ps->session_count;
             if (i < ps->session_count) {
                 ps->sessions[i] = ps->sessions[ps->session_count];
@@ -582,7 +587,7 @@ nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session)
     /* LOCK */
     pthread_mutex_lock(&ps->lock);
 
-    ret = _nc_ps_del_session(ps, session);
+    ret = _nc_ps_del_session(ps, session, -1);
 
     /* UNLOCK */
     pthread_mutex_unlock(&ps->lock);
@@ -676,6 +681,11 @@ nc_send_reply(struct nc_session *session, struct nc_server_rpc *rpc)
     struct nc_server_reply *reply;
     int ret;
 
+    if (!rpc) {
+        ERRINT;
+        return NC_MSG_ERROR;
+    }
+
     /* no callback, reply with a not-implemented error */
     if (!rpc->tree || !rpc->tree->schema->priv) {
         reply = nc_server_reply_err(nc_err(NC_ERR_OP_NOT_SUPPORTED, NC_ERR_TYPE_PROT));
@@ -713,7 +723,7 @@ nc_ps_poll(struct nc_pollsession *ps, int timeout)
     time_t cur_time;
     NC_MSG_TYPE msgtype;
     struct nc_session *session;
-    struct nc_server_rpc *rpc;
+    struct nc_server_rpc *rpc = NULL;
 
     if (!ps || !ps->session_count) {
         ERRARG;
@@ -778,7 +788,7 @@ retry_poll:
                 uint16_t j;
 
                 /* things are not that simple with SSH... */
-                ret = nc_ssh_pollin(ps->sessions[i], &timeout);
+                ret = nc_ssh_pollin(ps->sessions[i], timeout);
 
                 /* clear POLLIN on sessions sharing this session's SSH session */
                 if ((ret == 1) || (ret >= 4)) {
@@ -834,7 +844,7 @@ retry_poll:
     session = ps->sessions[i];
 
     /* reading an RPC and sending a reply must be atomic (no other RPC should be read) */
-    ret = nc_timedlock(session->ti_lock, timeout, NULL);
+    ret = nc_timedlock(session->ti_lock, timeout);
     if (ret != 1) {
         /* error or timeout */
         goto finish;
@@ -905,7 +915,7 @@ nc_ps_clear(struct nc_pollsession *ps, int all, void (*data_free)(void *))
     pthread_mutex_lock(&ps->lock);
 
     if (all) {
-        for (i = 0; i < ps->session_count; ) {
+        for (i = 0; i < ps->session_count; i++) {
             nc_session_free(ps->sessions[i], data_free);
         }
         free(ps->sessions);
@@ -917,7 +927,7 @@ nc_ps_clear(struct nc_pollsession *ps, int all, void (*data_free)(void *))
         for (i = 0; i < ps->session_count; ) {
             if (ps->sessions[i]->status != NC_STATUS_RUNNING) {
                 session = ps->sessions[i];
-                _nc_ps_del_session(ps, session);
+                _nc_ps_del_session(ps, NULL, i);
                 nc_session_free(session, data_free);
                 continue;
             }
