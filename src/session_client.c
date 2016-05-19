@@ -198,6 +198,7 @@ libyang_module_clb(const char *name, const char *revision, void *user_data, LYS_
     struct nc_rpc *rpc;
     struct nc_reply *reply;
     struct nc_reply_data *data_rpl;
+    struct lyd_node_anyxml *get_schema_data;
     NC_MSG_TYPE msg;
     char *model_data = NULL;
     uint64_t msgid;
@@ -215,7 +216,7 @@ libyang_module_clb(const char *name, const char *revision, void *user_data, LYS_
         return NULL;
     }
 
-    msg = nc_recv_reply(session, rpc, msgid, 250, 0, &reply);
+    msg = nc_recv_reply(session, rpc, msgid, 1000, 0, &reply);
     nc_rpc_free(rpc);
     if (msg == NC_MSG_WOULDBLOCK) {
         ERR("Session %u: timeout for receiving reply to a <get-schema> expired.", session->id);
@@ -233,10 +234,17 @@ libyang_module_clb(const char *name, const char *revision, void *user_data, LYS_
     }
 
     data_rpl = (struct nc_reply_data *)reply;
-    if (((struct lyd_node_anyxml *)data_rpl->data)->xml_struct) {
-        lyxml_print_mem(&model_data, ((struct lyd_node_anyxml *)data_rpl->data)->value.xml, LYXML_PRINT_SIBLINGS);
+    if ((data_rpl->data->schema->nodetype != LYS_RPC) || strcmp(data_rpl->data->schema->name, "get-schema")
+            || !data_rpl->data->child || (data_rpl->data->child->schema->nodetype != LYS_ANYXML)) {
+        ERR("Session %u: unexpected data in reply to a <get-schema> RPC.", session->id);
+        nc_reply_free(reply);
+        return NULL;
+    }
+    get_schema_data = (struct lyd_node_anyxml *)data_rpl->data->child;
+    if (get_schema_data->xml_struct) {
+        lyxml_print_mem(&model_data, get_schema_data->value.xml, LYXML_PRINT_SIBLINGS);
     } else {
-        model_data = strdup(((struct lyd_node_anyxml *)data_rpl->data)->value.str);
+        model_data = strdup(get_schema_data->value.str);
     }
     nc_reply_free(reply);
     *free_model_data = free;
@@ -466,53 +474,30 @@ get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_el
         cont = session->notifs;
         session->notifs = cont->next;
 
-        pthread_mutex_unlock(session->ti_lock);
-
-        *msg = cont->msg;
+        xml = cont->msg;
         free(cont);
 
-        return NC_MSG_NOTIF;
+        msgtype = NC_MSG_NOTIF;
     }
 
     /* try to get rpc-reply from the session's queue */
     if (msgid && session->replies) {
-        while (session->replies) {
-            cont = session->replies;
-            session->replies = cont->next;
+        cont = session->replies;
+        session->replies = cont->next;
 
-            str_msgid = lyxml_get_attr(cont->msg, "message-id", NULL);
-            cur_msgid = strtoul(str_msgid, &ptr, 10);
+        xml = cont->msg;
+        free(cont);
 
-            if (cur_msgid == msgid) {
-                session->replies = cont->next;
-                pthread_mutex_unlock(session->ti_lock);
-
-                *msg = cont->msg;
-                free(cont);
-
-                return NC_MSG_REPLY;
-            }
-
-            ERR("Session %u: discarding a <rpc-reply> with an unexpected message-id \"%s\".", str_msgid);
-            lyxml_free(session->ctx, cont->msg);
-            free(cont);
-        }
+        msgtype = NC_MSG_REPLY;
     }
 
-    /* read message from wire */
-    msgtype = nc_read_msg_poll(session, timeout, &xml);
+    if (!msgtype) {
+        /* read message from wire */
+        msgtype = nc_read_msg_poll(session, timeout, &xml);
+    }
 
     /* we read rpc-reply, want a notif */
     if (!msgid && (msgtype == NC_MSG_REPLY)) {
-        /* just check that there is a message-id */
-        str_msgid = lyxml_get_attr(xml, "message-id", NULL);
-        if (!str_msgid) {
-            pthread_mutex_unlock(session->ti_lock);
-            ERR("Session %u: received a <rpc-reply> with no message-id, discarding.", session->id);
-            lyxml_free(session->ctx, xml);
-            return NC_MSG_ERROR;
-        }
-
         cont_ptr = &session->replies;
         while (*cont_ptr) {
             cont_ptr = &((*cont_ptr)->next);
@@ -520,6 +505,7 @@ get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_el
         *cont_ptr = malloc(sizeof **cont_ptr);
         if (!*cont_ptr) {
             ERRMEM;
+            pthread_mutex_unlock(session->ti_lock);
             lyxml_free(session->ctx, xml);
             return NC_MSG_ERROR;
         }
@@ -544,6 +530,7 @@ get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_el
         *cont_ptr = malloc(sizeof **cont_ptr);
         if (!cont_ptr) {
             ERRMEM;
+            pthread_mutex_unlock(session->ti_lock);
             lyxml_free(session->ctx, xml);
             return NC_MSG_ERROR;
         }
@@ -562,6 +549,19 @@ get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_el
 
     case NC_MSG_REPLY:
         if (msgid) {
+            /* check message-id */
+            str_msgid = lyxml_get_attr(xml, "message-id", NULL);
+            if (!str_msgid) {
+                ERR("Session %u: received a <rpc-reply> without a message-id.", session->id);
+                msgtype = NC_MSG_REPLY_ERR_MSGID;
+            } else {
+                cur_msgid = strtoul(str_msgid, &ptr, 10);
+                if (cur_msgid != msgid) {
+                    ERR("Session %u: received a <rpc-reply> with an unexpected message-id \"%s\".",
+                        session->id, str_msgid);
+                    msgtype = NC_MSG_REPLY_ERR_MSGID;
+                }
+            }
             *msg = xml;
         }
         break;
@@ -569,12 +569,14 @@ get_msg(struct nc_session *session, int timeout, uint64_t msgid, struct lyxml_el
     case NC_MSG_HELLO:
         ERR("Session %u: received another <hello> message.", session->id);
         lyxml_free(session->ctx, xml);
-        return NC_MSG_ERROR;
+        msgtype = NC_MSG_ERROR;
+        break;
 
     case NC_MSG_RPC:
         ERR("Session %u: received <rpc> from a NETCONF server.", session->id);
         lyxml_free(session->ctx, xml);
-        return NC_MSG_ERROR;
+        msgtype = NC_MSG_ERROR;
+        break;
 
     default:
         /* NC_MSG_WOULDBLOCK and NC_MSG_ERROR - pass it out;
@@ -1068,7 +1070,7 @@ nc_recv_reply(struct nc_session *session, struct nc_rpc *rpc, uint64_t msgid, in
 
     msgtype = get_msg(session, timeout, msgid, &xml);
 
-    if (msgtype == NC_MSG_REPLY) {
+    if ((msgtype == NC_MSG_REPLY) || (msgtype == NC_MSG_REPLY_ERR_MSGID)) {
         *reply = parse_reply(session->ctx, xml, rpc, parseroptions);
         lyxml_free(session->ctx, xml);
         if (!(*reply)) {
@@ -1166,11 +1168,15 @@ nc_recv_notif_thread(void *arg)
                 break;
             }
             nc_notif_free(notif);
+        } else if (msgtype == NC_MSG_ERROR) {
+            break;
         }
 
         usleep(NC_CLIENT_NOTIF_THREAD_SLEEP);
     }
 
+    VRB("Session %u: notification thread exit.", session->id);
+    session->ntf_tid = NULL;
     return NULL;
 }
 
@@ -1274,7 +1280,7 @@ nc_send_rpc(struct nc_session *session, struct nc_rpc *rpc, int timeout, uint64_
         if (rpc_gen->has_data) {
             data = rpc_gen->content.data;
         } else {
-            data = lyd_parse_mem(session->ctx, rpc_gen->content.xml_str, LYD_XML, LYD_OPT_STRICT);
+            data = lyd_parse_mem(session->ctx, rpc_gen->content.xml_str, LYD_XML, LYD_OPT_RPC | LYD_OPT_STRICT);
         }
         break;
 
