@@ -553,8 +553,6 @@ nc_ps_lock(struct nc_pollsession *ps)
         our_id = 0;
     }
 
-    ERR("DBG: q_begin = %u, q_len = %u, our_id = %u", ps->queue_begin, ps->queue_len, our_id);
-
     /* add ourselves into the queue */
     if (ps->queue_len == NC_PS_QUEUE_SIZE) {
         ERR("Pollsession queue too small.");
@@ -567,13 +565,6 @@ nc_ps_lock(struct nc_pollsession *ps)
         queue_last -= NC_PS_QUEUE_SIZE;
     }
     ps->queue[queue_last] = our_id;
-
-    for (ret = 0; ret < ps->queue_len; ++ret) {
-        if (ps->queue_begin + ret == NC_PS_QUEUE_SIZE) {
-            ret = -ps->queue_begin;
-        }
-        ERR("DBG: q[%u] = %u", ps->queue_begin + ret, ps->queue[ps->queue_begin + ret]);
-    }
 
     /* is it our turn? */
     while (ps->queue[ps->queue_begin] != our_id) {
