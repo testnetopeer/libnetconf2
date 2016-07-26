@@ -553,7 +553,7 @@ nc_ps_lock(struct nc_pollsession *ps)
         our_id = 0;
     }
 
-    ERR("DBG: q_begin = %u, q_len = %u, our_id = %u");
+    ERR("DBG: q_begin = %u, q_len = %u, our_id = %u", ps->queue_begin, ps->queue_len, our_id);
 
     /* add ourselves into the queue */
     if (ps->queue_len == NC_PS_QUEUE_SIZE) {
