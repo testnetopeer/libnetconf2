@@ -653,6 +653,10 @@ nc_ps_unlock(struct nc_pollsession *ps, uint8_t id, const char *func)
     /* we must be the first, it was our turn after all, right? */
     if (ps->queue[ps->queue_begin] != id) {
         ERRINT;
+        /* UNLOCK */
+        if (!ret) {
+            pthread_mutex_unlock(&ps->lock);
+        }
         return -1;
     }
 
@@ -1384,10 +1388,6 @@ nc_server_endpt_set_address_port(const char *endpt_name, const char *address, ui
         goto fail;
     }
 #endif
-    if (!bind) {
-        ERRINT;
-        goto fail;
-    }
 
     if (set_addr) {
         port = bind->port;
