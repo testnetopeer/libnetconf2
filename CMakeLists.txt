@@ -1,4 +1,5 @@
 cmake_minimum_required(VERSION 2.6)
+include (CheckFunctionExists)
 
 # include custom Modules
 set(CMAKE_MODULE_PATH ${CMAKE_MODULE_PATH} "${CMAKE_SOURCE_DIR}/CMakeModules/")
@@ -36,8 +37,8 @@ set(CMAKE_C_FLAGS_DEBUG   "-g -O0")
 
 # set version
 set(LIBNETCONF2_MAJOR_VERSION 0)
-set(LIBNETCONF2_MINOR_VERSION 6)
-set(LIBNETCONF2_MICRO_VERSION 8)
+set(LIBNETCONF2_MINOR_VERSION 7)
+set(LIBNETCONF2_MICRO_VERSION 29)
 set(LIBNETCONF2_VERSION ${LIBNETCONF2_MAJOR_VERSION}.${LIBNETCONF2_MINOR_VERSION}.${LIBNETCONF2_MICRO_VERSION})
 set(LIBNETCONF2_SOVERSION ${LIBNETCONF2_MAJOR_VERSION}.${LIBNETCONF2_MINOR_VERSION})
 
@@ -99,16 +100,21 @@ else()
     option(ENABLE_VALGRIND_TESTS "Build tests with valgrind" OFF)
 endif()
 
-#dependencies - pthread
+# dependencies - pthread
 set(CMAKE_THREAD_PREFER_PTHREAD TRUE)
 find_package(Threads REQUIRED)
 target_link_libraries(netconf2 ${CMAKE_THREAD_LIBS_INIT})
+
+# check availability for some pthread functions
+set(CMAKE_REQUIRED_LIBRARIES pthread)
+check_function_exists(pthread_spin_lock HAVE_SPINLOCK)
+check_function_exists(pthread_mutex_timedlock HAVE_PTHREAD_MUTEX_TIMEDLOCK)
 
 # dependencies - libssh
 if(ENABLE_SSH)
     find_package(LibSSH 0.6.4 REQUIRED)
     set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNC_ENABLED_SSH ${LIBSSH_DEFINITIONS}")
-    target_link_libraries(netconf2 ${LIBSSH_LIBRARIES} -lssh_threads -lcrypt)
+    target_link_libraries(netconf2 ${LIBSSH_LIBRARIES} -L${SSH_LIBRARY} -lssh_threads -lcrypt)
     include_directories(${LIBSSH_INCLUDE_DIRS})
 endif()
 

@@ -12,7 +12,7 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
-#define _GNU_SOURCE /* asprintf, ppoll */
+#define _GNU_SOURCE /* asprintf */
 #define _POSIX_SOUCE /* signals */
 #include <assert.h>
 #include <errno.h>
@@ -24,6 +24,10 @@
 #include <unistd.h>
 #include <signal.h>
 
+#ifdef NC_ENABLED_TLS
+#   include <openssl/err.h>
+#endif
+
 #include <libyang/libyang.h>
 
 #include "libnetconf.h"
@@ -33,7 +37,7 @@
 static ssize_t
 nc_read(struct nc_session *session, char *buf, size_t count, uint16_t *read_timeout)
 {
-    size_t size = 0;
+    size_t readd = 0;
     ssize_t r = -1;
     uint16_t sleep_count = 0;
 
@@ -48,14 +52,14 @@ nc_read(struct nc_session *session, char *buf, size_t count, uint16_t *read_time
         return 0;
     }
 
-    while (count) {
+    do {
         switch (session->ti_type) {
         case NC_TI_NONE:
             return 0;
 
         case NC_TI_FD:
             /* read via standard file descriptor */
-            r = read(session->ti.fd.in, &(buf[size]), count);
+            r = read(session->ti.fd.in, buf + readd, count - readd);
             if (r < 0) {
                 if (errno == EAGAIN) {
                     r = 0;
@@ -82,7 +86,7 @@ nc_read(struct nc_session *session, char *buf, size_t count, uint16_t *read_time
 #ifdef NC_ENABLED_SSH
         case NC_TI_LIBSSH:
             /* read via libssh */
-            r = ssh_channel_read(session->ti.libssh.channel, &(buf[size]), count, 0);
+            r = ssh_channel_read(session->ti.libssh.channel, buf + readd, count - readd, 0);
             if (r == SSH_AGAIN) {
                 r = 0;
                 break;
@@ -107,7 +111,7 @@ nc_read(struct nc_session *session, char *buf, size_t count, uint16_t *read_time
 #ifdef NC_ENABLED_TLS
         case NC_TI_OPENSSL:
             /* read via OpenSSL */
-            r = SSL_read(session->ti.tls, &(buf[size]), count);
+            r = SSL_read(session->ti.tls, buf + readd, count - readd);
             if (r <= 0) {
                 int x;
                 switch (x = SSL_get_error(session->ti.tls, r)) {
@@ -145,14 +149,13 @@ nc_read(struct nc_session *session, char *buf, size_t count, uint16_t *read_time
                 session->term_reason = NC_SESSION_TERM_OTHER;
                 return -1;
             }
-            continue;
         }
 
-        size += r;
-        count -= r;
-    }
+        readd += r;
+    } while (readd < count);
+    buf[count] = '\0';
 
-    return (ssize_t)size;
+    return (ssize_t)readd;
 }
 
 static ssize_t
@@ -297,6 +300,10 @@ nc_read_msg(struct nc_session *session, struct lyxml_elem **data)
             if (!strcmp(chunk, "#\n")) {
                 /* end of chunked framing message */
                 free(chunk);
+                if (!msg) {
+                    ERR("Session %u: invalid frame chunk delimiters.", session->id);
+                    goto malformed_msg;
+                }
                 break;
             }
 
@@ -328,7 +335,7 @@ nc_read_msg(struct nc_session *session, struct lyxml_elem **data)
 
         break;
     }
-    DBG("Session %u: received message:\n%s", session->id, msg);
+    DBG("Session %u: received message:\n%s\n", session->id, msg);
 
     /* build XML tree */
     *data = lyxml_parse_mem(session->ctx, msg, 0);
@@ -394,10 +401,9 @@ error:
 static int
 nc_read_poll(struct nc_session *session, int timeout)
 {
-    sigset_t sigmask;
+    sigset_t sigmask, origmask;
     int ret = -2;
     struct pollfd fds;
-    struct timespec ts_timeout;
 
     if ((session->status != NC_STATUS_RUNNING) && (session->status != NC_STATUS_STARTING)) {
         ERR("Session %u: invalid session to poll.", session->id);
@@ -446,17 +452,10 @@ nc_read_poll(struct nc_session *session, int timeout)
             fds.events = POLLIN;
             fds.revents = 0;
 
-            if (timeout > -1) {
-                if (!timeout) {
-                    ts_timeout.tv_sec = 0;
-                    ts_timeout.tv_nsec = 0;
-                } else if (timeout > 0) {
-                    ts_timeout.tv_sec = timeout / 1000;
-                    ts_timeout.tv_nsec = (timeout % 1000) * 1000000;
-                }
-            }
             sigfillset(&sigmask);
-            ret = ppoll(&fds, 1, (timeout == -1 ? NULL : &ts_timeout), &sigmask);
+            pthread_sigmask(SIG_SETMASK, &sigmask, &origmask);
+            ret = poll(&fds, 1, timeout);
+            pthread_sigmask(SIG_SETMASK, &origmask, NULL);
         }
 
         break;
@@ -469,7 +468,7 @@ nc_read_poll(struct nc_session *session, int timeout)
     /* process the poll result, unified ret meaning for poll and ssh_channel poll */
     if (ret < 0) {
         /* poll failed - something really bad happened, close the session */
-        ERR("Session %u: ppoll error (%s).", session->id, strerror(errno));
+        ERR("Session %u: poll error (%s).", session->id, strerror(errno));
         session->status = NC_STATUS_INVALID;
         session->term_reason = NC_SESSION_TERM_OTHER;
         return -1;
@@ -566,9 +565,12 @@ struct wclb_arg {
     size_t len;
 };
 
-static ssize_t
+static int
 nc_write(struct nc_session *session, const void *buf, size_t count)
 {
+    int c;
+    size_t written = 0;
+
     if ((session->status != NC_STATUS_RUNNING) && (session->status != NC_STATUS_STARTING)) {
         return -1;
     }
@@ -581,34 +583,77 @@ nc_write(struct nc_session *session, const void *buf, size_t count)
         return -1;
     }
 
-    switch (session->ti_type) {
-    case NC_TI_NONE:
-        return -1;
+    DBG("Session %u: sending message:\n%.*s\n", session->id, count, buf);
 
-    case NC_TI_FD:
-        return write(session->ti.fd.out, buf, count);
+    do {
+        switch (session->ti_type) {
+        case NC_TI_FD:
+            c = write(session->ti.fd.out, (char *)(buf + written), count - written);
+            if (c < 0) {
+                ERR("Session %u: socket error (%s).", session->id, strerror(errno));
+                return -1;
+            }
+            break;
 
 #ifdef NC_ENABLED_SSH
-    case NC_TI_LIBSSH:
-        if (ssh_channel_is_closed(session->ti.libssh.channel) || ssh_channel_is_eof(session->ti.libssh.channel)) {
-            if (ssh_channel_is_closed(session->ti.libssh.channel)) {
-                ERR("Session %u: SSH channel unexpectedly closed.", session->id);
-            } else {
-                ERR("Session %u: SSH channel unexpected EOF.", session->id);
+        case NC_TI_LIBSSH:
+            if (ssh_channel_is_closed(session->ti.libssh.channel) || ssh_channel_is_eof(session->ti.libssh.channel)) {
+                if (ssh_channel_is_closed(session->ti.libssh.channel)) {
+                    ERR("Session %u: SSH channel unexpectedly closed.", session->id);
+                } else {
+                    ERR("Session %u: SSH channel unexpected EOF.", session->id);
+                }
+                session->status = NC_STATUS_INVALID;
+                session->term_reason = NC_SESSION_TERM_DROPPED;
+                return -1;
             }
-            session->status = NC_STATUS_INVALID;
-            session->term_reason = NC_SESSION_TERM_DROPPED;
-            return -1;
-        }
-        return ssh_channel_write(session->ti.libssh.channel, buf, count);
+            c = ssh_channel_write(session->ti.libssh.channel, (char *)(buf + written), count - written);
+            if ((c == SSH_ERROR) || (c == -1)) {
+                ERR("Session %u: SSH channel write failed.", session->id);
+                return -1;
+            }
+            break;
 #endif
 #ifdef NC_ENABLED_TLS
-    case NC_TI_OPENSSL:
-        return SSL_write(session->ti.tls, buf, count);
-#endif
-    }
+        unsigned long e;
 
-    return -1;
+        case NC_TI_OPENSSL:
+            c = SSL_write(session->ti.tls, (char *)(buf + written), count - written);
+            if (c < 1) {
+                switch ((e = SSL_get_error(session->ti.tls, c))) {
+                case SSL_ERROR_ZERO_RETURN:
+                    ERR("Session %u: SSL connection was properly closed.", session->id);
+                    return -1;
+                case SSL_ERROR_WANT_WRITE:
+                    c = 0;
+                    break;
+                case SSL_ERROR_SYSCALL:
+                    ERR("Session %u: SSL socket error (%s).", session->id, strerror(errno));
+                    return -1;
+                case SSL_ERROR_SSL:
+                    ERR("Session %u: SSL error (%s).", session->id, ERR_reason_error_string(e));
+                    return -1;
+                default:
+                    ERR("Session %u: unknown SSL error occured.", session->id);
+                    return -1;
+                }
+            }
+            break;
+#endif
+        default:
+            ERRINT;
+            return -1;
+        }
+
+        if (c == 0) {
+            /* we must wait */
+            usleep(NC_TIMEOUT_STEP);
+        }
+
+        written += c;
+    } while (written < count);
+
+    return written;
 }
 
 static int
@@ -925,6 +970,7 @@ nc_write_msg(struct nc_session *session, NC_MSG_TYPE type, ...)
     struct wclb_arg arg;
     const char **capabilities;
     uint32_t *sid = NULL, i;
+    int wd = 0;
 
     assert(session);
 
@@ -976,8 +1022,24 @@ nc_write_msg(struct nc_session *session, NC_MSG_TYPE type, ...)
             nc_write_clb((void *)&arg, "<ok/>", 5, 0);
             break;
         case NC_RPL_DATA:
-            assert(((struct nc_reply_data *)reply)->data->schema->nodetype == LYS_RPC);
-            lyd_print_clb(nc_write_xmlclb, (void *)&arg, ((struct nc_reply_data *)reply)->data->child, LYD_XML, LYP_WITHSIBLINGS);
+            assert(((struct nc_server_reply_data *)reply)->data->schema->nodetype == LYS_RPC);
+            switch(((struct nc_server_reply_data *)reply)->wd) {
+            case NC_WD_UNKNOWN:
+            case NC_WD_EXPLICIT:
+                wd = LYP_WD_EXPLICIT;
+                break;
+            case NC_WD_TRIM:
+                wd = LYP_WD_TRIM;
+                break;
+            case NC_WD_ALL:
+                wd = LYP_WD_ALL;
+                break;
+            case NC_WD_ALL_TAG:
+                wd = LYP_WD_ALL_TAG;
+                break;
+            }
+            lyd_print_clb(nc_write_xmlclb, (void *)&arg, ((struct nc_reply_data *)reply)->data->child, LYD_XML,
+                          LYP_WITHSIBLINGS | wd);
             break;
         case NC_RPL_ERROR:
             error_rpl = (struct nc_server_reply_error *)reply;

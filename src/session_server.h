@@ -48,7 +48,7 @@ void nc_session_set_term_reason(struct nc_session *session, NC_SESSION_TERM_REAS
  * all the strings, which is thread-safe. Reading models is considered thread-safe
  * as models cannot be removed and are rarely modified (augments or deviations).
  *
- * If the callbacks on schema nodes (their private data) are modified after
+ * If the RPC callbacks on schema nodes (mentioned in @ref howtoserver) are modified after
  * server initialization with that particular context, they will be called (changes
  * will take effect). However, there could be race conditions as the access to
  * these callbacks is not thread-safe.
@@ -61,8 +61,8 @@ void nc_session_set_term_reason(struct nc_session *session, NC_SESSION_TERM_REAS
  * This context can safely be destroyed only after calling the last libnetconf2
  * function in an application.
  *
- * Supported RPCs of models in the context are expected to have the private field
- * in the corresponding RPC schema node set to a nc_rpc_clb function callback.
+ * Supported RPCs of models in the context are expected to have their callback
+ * in the corresponding RPC schema node set to a nc_rpc_clb function callback using nc_set_rpc_callback().
  * This callback is called by nc_ps_poll() if the particular RPC request is
  * received. Callbacks for ietf-netconf:get-schema (supporting YANG and YIN format
  * only) and ietf-netconf:close-session are set internally if left unset.
@@ -216,7 +216,7 @@ int nc_ps_del_session(struct nc_pollsession *ps, struct nc_session *session);
  * @brief Learn the number of sessions in a pollsession structure.
  *
  * @param[in] ps Pollsession structure to check.
- * @return Number of sessions (even invalid ones) in \p ps.
+ * @return Number of sessions (even invalid ones) in \p ps, -1 on error.
  */
 uint16_t nc_ps_session_count(struct nc_pollsession *ps);
 
@@ -225,7 +225,7 @@ uint16_t nc_ps_session_count(struct nc_pollsession *ps);
 #define NC_PSPOLL_BAD_RPC 0x0004       /**< RPC was received, but failed to be parsed. */
 #define NC_PSPOLL_REPLY_ERROR 0x0008   /**< Response to the RPC was a \<rpc-reply\> of type error. */
 #define NC_PSPOLL_SESSION_TERM 0x0010  /**< Some session was terminated. */
-#define NC_PSPOLL_SESSION_ERROR 0x0020 /**< Some session was terminated incorrectly (not by \<close-session\> or \<kill-session\> RPCs. */
+#define NC_PSPOLL_SESSION_ERROR 0x0020 /**< Some session was terminated incorrectly (not by a \<close-session\> or \<kill-session\> RPC). */
 #define NC_PSPOLL_PENDING 0x0040       /**< Unhandled pending events on other session. */
 #define NC_PSPOLL_ERROR 0x0080         /**< Other fatal errors (they are printed). */
 
@@ -262,6 +262,25 @@ int nc_ps_poll(struct nc_pollsession *ps, int timeout, struct nc_session **sessi
 void nc_ps_clear(struct nc_pollsession *ps, int all, void (*data_free)(void *));
 
 #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
+
+/**
+ * @brief Add a new endpoint.
+ *
+ * Before the endpoint can accept any connections, its address and port must
+ * be set on at least one transport protocol.
+ *
+ * @param[in] name Arbitrary unique endpoint name.
+ * @return 0 on success, -1 on error.
+ */
+int nc_server_add_endpt(const char *name);
+
+/**
+ * @brief Stop listening on and remove an endpoint.
+ *
+ * @param[in] name Endpoint name. NULL matches all endpoints.
+ * @return 0 on success, -1 on not finding any match.
+ */
+int nc_server_del_endpt(const char *name);
 
 /**
  * @brief Accept new sessions on all the listening endpoints.
@@ -302,20 +321,9 @@ NC_MSG_TYPE nc_session_accept_ssh_channel(struct nc_session *orig_session, struc
 NC_MSG_TYPE nc_ps_accept_ssh_channel(struct nc_pollsession *ps, struct nc_session **session);
 
 /**
- * @brief Add a new SSH endpoint and start listening on it.
- *
- * @param[in] name Arbitrary unique endpoint name. There can be a TLS endpoint with
- *                 the same name.
- * @param[in] address IP address to listen on.
- * @param[in] port Port to listen on.
- * @return 0 on success, -1 on error.
- */
-int nc_server_ssh_add_endpt_listen(const char *name, const char *address, uint16_t port);
-
-/**
  * @brief Change SSH endpoint listening address.
  *
- * On error the previous listening socket is left untouched.
+ * On error the previous listening socket (if any) is left untouched.
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] address New listening address.
@@ -326,7 +334,7 @@ int nc_server_ssh_endpt_set_address(const char *endpt_name, const char *address)
 /**
  * @brief Change SSH endpoint listening port.
  *
- * On error the previous listening socket is left untouched.
+ * On error the previous listening socket (if any) is left untouched.
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] port New listening port.
@@ -335,22 +343,24 @@ int nc_server_ssh_endpt_set_address(const char *endpt_name, const char *address)
 int nc_server_ssh_endpt_set_port(const char *endpt_name, uint16_t port);
 
 /**
- * @brief Stop listening on and remove an SSH endpoint.
- *
- * @param[in] name Endpoint name. NULL matches all (SSH) endpoints.
- * @return 0 on success, -1 on not finding any match.
- */
-int nc_server_ssh_del_endpt(const char *name);
-
-/**
- * @brief Set endpoint SSH host keys the server will identify itself with. Each of RSA, DSA, and
- *        ECDSA keys can be set. If the particular type was already set, it is replaced.
+ * @brief Add endpoint SSH host keys the server will identify itself with. Any RSA, DSA, and
+ *        ECDSA keys can be added. However, a maximum of one key of each type will be used
+ *        during SSH authentication, later keys replacing the earlier ones.
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] privkey_path Path to a private key.
  * @return 0 on success, -1 on error.
  */
-int nc_server_ssh_endpt_set_hostkey(const char *endpt_name, const char *privkey_path);
+int nc_server_ssh_endpt_add_hostkey(const char *endpt_name, const char *privkey_path);
+
+/**
+ * @brief Delete endpoint SSH host keys. Their order is preserved.
+ *
+ * @param[in] endpt_name Existing endpoint name.
+ * @param[in] privkey_path Path to a private key. NULL matches all the keys.
+ * @return 0 on success, -1 on error.
+ */
+int nc_server_ssh_endpt_del_hostkey(const char *endpt_name, const char *privkey_path);
 
 /**
  * @brief Set endpoint SSH banner the server will send to every client.
@@ -415,20 +425,9 @@ int nc_server_ssh_endpt_del_authkey(const char *endpt_name, const char *pubkey_p
 #ifdef NC_ENABLED_TLS
 
 /**
- * @brief Add a new TLS endpoint and start listening on it.
- *
- * @param[in] name Arbitrary unique endpoint name. There can be an SSH endpoint with
- *                 the same name.
- * @param[in] address IP address to listen on.
- * @param[in] port Port to listen on.
- * @return 0 on success, -1 on error.
- */
-int nc_server_tls_add_endpt_listen(const char *name, const char *address, uint16_t port);
-
-/**
  * @brief Change TLS endpoint listening address.
  *
- * On error the previous listening socket is left untouched.
+ * On error the previous listening socket (if any) is left untouched.
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] address New listening address.
@@ -439,21 +438,13 @@ int nc_server_tls_endpt_set_address(const char *endpt_name, const char *address)
 /**
  * @brief Change TLS endpoint listening port.
  *
- * On error the previous listening socket is left untouched.
+ * On error the previous listening socket (if any) is left untouched.
  *
  * @param[in] endpt_name Existing endpoint name.
  * @param[in] port New listening port.
  * @return 0 on success, -1 on error.
  */
 int nc_server_tls_endpt_set_port(const char *endpt_name, uint16_t port);
-
-/**
- * @brief Stop listening on and remove a TLS endpoint.
- *
- * @param[in] name Endpoint name. NULL matches all (TLS) endpoints.
- * @return 0 on success, -1 on not finding any match.
- */
-int nc_server_tls_del_endpt(const char *name);
 
 /**
  * @brief Set server TLS certificate. Alternative to nc_tls_server_set_cert_path().
@@ -505,20 +496,22 @@ int nc_server_tls_endpt_set_key_path(const char *endpt_name, const char *privkey
  *        safely used together with nc_server_tls_endpt_set_trusted_ca_paths().
  *
  * @param[in] endpt_name Existing endpoint name.
+ * @param[in] cert_name Arbitary name identifying this certificate.
  * @param[in] cert Base64-enocded certificate in ASN.1 DER encoding.
  * @return 0 on success, -1 on error.
  */
-int nc_server_tls_endpt_add_trusted_cert(const char *endpt_name, const char *cert);
+int nc_server_tls_endpt_add_trusted_cert(const char *endpt_name, const char *cert_name, const char *cert);
 
 /**
  * @brief Add a trusted certificate. Can be both a CA or a client one. Can be
  *        safely used together with nc_server_tls_endpt_set_trusted_ca_paths().
  *
  * @param[in] endpt_name Existing endpoint name.
+ * @param[in] cert_name Arbitary name identifying this certificate.
  * @param[in] cert_path Path to a trusted certificate file in PEM format.
  * @return 0 on success, -1 on error.
  */
-int nc_server_tls_endpt_add_trusted_cert_path(const char *endpt_name, const char *cert_path);
+int nc_server_tls_endpt_add_trusted_cert_path(const char *endpt_name, const char *cert_name, const char *cert_path);
 
 /**
  * @brief Set trusted Certificate Authority certificate locations. There can only be
@@ -538,8 +531,10 @@ int nc_server_tls_endpt_set_trusted_ca_paths(const char *endpt_name, const char 
  *        CTN entries are not affected.
  *
  * @param[in] endpt_name Existing endpoint name.
+ * @param[in] cert_name Name of the certificate to delete. NULL deletes all the certificates.
+ * @return 0 on success, -1 on not found.
  */
-void nc_server_tls_endpt_clear_certs(const char *endpt_name);
+int nc_server_tls_endpt_del_trusted_cert(const char *endpt_name, const char *cert_name);
 
 /**
  * @brief Set Certificate Revocation List locations. There can only be one file
@@ -571,7 +566,8 @@ void nc_server_tls_endpt_clear_crls(const char *endpt_name);
  * @param[in] name Specific username if \p map_type == NC_TLS_CTN_SPECIFED. Must be NULL otherwise.
  * @return 0 on success, -1 on error.
  */
-int nc_server_tls_endpt_add_ctn(const char *endpt_name, uint32_t id, const char *fingerprint, NC_TLS_CTN_MAPTYPE map_type, const char *name);
+int nc_server_tls_endpt_add_ctn(const char *endpt_name, uint32_t id, const char *fingerprint,
+                                NC_TLS_CTN_MAPTYPE map_type, const char *name);
 
 /**
  * @brief Remove a Cert-to-name entry.
@@ -583,7 +579,8 @@ int nc_server_tls_endpt_add_ctn(const char *endpt_name, uint32_t id, const char 
  * @param[in] name Specific username for the entry. NULL matches all the usernames.
  * @return 0 on success, -1 on not finding any match.
  */
-int nc_server_tls_endpt_del_ctn(const char *endpt_name, int64_t id, const char *fingerprint, NC_TLS_CTN_MAPTYPE map_type, const char *name);
+int nc_server_tls_endpt_del_ctn(const char *endpt_name, int64_t id, const char *fingerprint,
+                                NC_TLS_CTN_MAPTYPE map_type, const char *name);
 
 #endif /* NC_ENABLED_TLS */
 

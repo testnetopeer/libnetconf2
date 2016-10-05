@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <sys/time.h>
 #include <time.h>
 #include <libyang/libyang.h>
 
@@ -45,6 +46,58 @@
 
 extern struct nc_server_opts server_opts;
 
+int
+nc_gettimespec(struct timespec *ts)
+{
+#ifdef CLOCK_REALTIME
+    return clock_gettime(CLOCK_REALTIME, ts);
+#else
+    int rc;
+    struct timeval tv;
+
+    rc = gettimeofday(&tv, NULL);
+    if (!rc) {
+        ts->tv_sec = (time_t)tv.tv_sec;
+        ts->tv_nsec = 1000L * (long)tv.tv_usec;
+    }
+    return rc;
+#endif
+}
+
+#ifndef HAVE_PTHREAD_MUTEX_TIMEDLOCK
+int
+pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *abstime)
+{
+    int rc;
+    struct timespec cur, dur;
+
+    /* Try to acquire the lock and, if we fail, sleep for 5ms. */
+    while ((rc = pthread_mutex_trylock(mutex)) == EBUSY) {
+        nc_gettimespec(&cur);
+
+        if ((cur.tv_sec > abstime->tv_sec) || ((cur.tv_sec == abstime->tv_sec) && (cur.tv_nsec >= abstime->tv_nsec))) {
+            break;
+        }
+
+        dur.tv_sec = abstime->tv_sec - cur.tv_sec;
+        dur.tv_nsec = abstime->tv_nsec - cur.tv_nsec;
+        if (dur.tv_nsec < 0) {
+            dur.tv_sec--;
+            dur.tv_nsec += 1000000000;
+        }
+
+        if ((dur.tv_sec != 0) || (dur.tv_nsec > 5000000)) {
+            dur.tv_sec = 0;
+            dur.tv_nsec = 5000000;
+        }
+
+        nanosleep(&dur, NULL);
+    }
+
+    return rc;
+}
+#endif
+
 /*
  * @return 1 - success
  *         0 - timeout
@@ -57,7 +110,7 @@ nc_timedlock(pthread_mutex_t *lock, int timeout)
     struct timespec ts_timeout;
 
     if (timeout > 0) {
-        clock_gettime(CLOCK_REALTIME, &ts_timeout);
+        nc_gettimespec(&ts_timeout);
 
         ts_timeout.tv_sec += timeout / 1000;
         ts_timeout.tv_nsec += (timeout % 1000) * 1000000;
@@ -461,11 +514,12 @@ API const char **
 nc_server_get_cpblts(struct ly_ctx *ctx)
 {
     struct lyd_node *child, *child2, *yanglib;
-    struct lyd_node_leaf_list **features = NULL, *ns = NULL, *rev = NULL, *name = NULL;
+    struct lyd_node_leaf_list **features = NULL, **deviations = NULL, *ns = NULL, *rev = NULL, *name = NULL, *module_set_id = NULL;
     const char **cpblts;
     const struct lys_module *mod;
-    int size = 10, count, feat_count = 0, i, str_len;
-    char str[512];
+    int size = 10, count, feat_count = 0, dev_count = 0, i, str_len;
+#define NC_CPBLT_BUF_LEN 512
+    char str[NC_CPBLT_BUF_LEN];
 
     if (!ctx) {
         ERRARG("ctx");
@@ -539,7 +593,7 @@ nc_server_get_cpblts(struct ly_ctx *ctx)
             }
 
             if (server_opts.wd_also_supported) {
-                strcat(str, "&amp;also-supported=");
+                strcat(str, "&also-supported=");
                 if (server_opts.wd_also_supported & NC_WD_ALL) {
                     strcat(str, "report-all,");
                 }
@@ -569,6 +623,13 @@ nc_server_get_cpblts(struct ly_ctx *ctx)
 
     /* models */
     LY_TREE_FOR(yanglib->child, child) {
+        if (!module_set_id) {
+            if (strcmp(child->prev->schema->name, "module-set-id")) {
+                ERRINT;
+                return NULL;
+            }
+            module_set_id = (struct lyd_node_leaf_list *)child->prev;
+        }
         if (!strcmp(child->schema->name, "module")) {
             LY_TREE_FOR(child->child, child2) {
                 if (!strcmp(child2->schema->name, "namespace")) {
@@ -582,9 +643,18 @@ nc_server_get_cpblts(struct ly_ctx *ctx)
                     if (!features) {
                         ERRMEM;
                         free(cpblts);
+                        free(deviations);
                         return NULL;
                     }
                     features[feat_count - 1] = (struct lyd_node_leaf_list *)child2;
+                } else if (!strcmp(child2->schema->name, "deviation")) {
+                    deviations = nc_realloc(deviations, ++dev_count * sizeof *deviations);
+                    if (!deviations) {
+                        ERRMEM;
+                        free(cpblts);
+                        free(features);
+                        return NULL;
+                    }
                 }
             }
 
@@ -594,12 +664,12 @@ nc_server_get_cpblts(struct ly_ctx *ctx)
             }
 
             str_len = sprintf(str, "%s?module=%s%s%s", ns->value_str, name->value_str,
-                              rev->value_str[0] ? "&amp;revision=" : "", rev->value_str);
+                              rev->value_str[0] ? "&revision=" : "", rev->value_str);
             if (feat_count) {
-                strcat(str, "&amp;features=");
-                str_len += 14;
+                strcat(str, "&features=");
+                str_len += 10;
                 for (i = 0; i < feat_count; ++i) {
-                    if (str_len + 1 + strlen(features[i]->value_str) >= 512) {
+                    if (str_len + 1 + strlen(features[i]->value_str) >= NC_CPBLT_BUF_LEN) {
                         ERRINT;
                         break;
                     }
@@ -611,15 +681,41 @@ nc_server_get_cpblts(struct ly_ctx *ctx)
                     str_len += strlen(features[i]->value_str);
                 }
             }
+            if (dev_count) {
+                strcat(str, "&deviations=");
+                str_len += 12;
+                for (i = 0; i < dev_count; ++i) {
+                    if (str_len + 1 + strlen(deviations[i]->value_str) >= NC_CPBLT_BUF_LEN) {
+                        ERRINT;
+                        break;
+                    }
+                    if (i) {
+                        strcat(str, ",");
+                        ++str_len;
+                    }
+                    strcat(str, deviations[i]->value_str);
+                    str_len += strlen(deviations[i]->value_str);
+                }
+            }
+            if (!strcmp(name->value_str, "ietf-yang-library")) {
+                str_len += sprintf(str + str_len, "&module-set-id=%s", module_set_id->value_str);
+            }
 
             add_cpblt(ctx, str, &cpblts, &size, &count);
 
             ns = NULL;
             name = NULL;
             rev = NULL;
-            free(features);
-            features = NULL;
-            feat_count = 0;
+            if (features || feat_count) {
+                free(features);
+                features = NULL;
+                feat_count = 0;
+            }
+            if (deviations || dev_count) {
+                free(deviations);
+                deviations = NULL;
+                dev_count = 0;
+            }
         }
     }
 
@@ -899,7 +995,6 @@ nc_ssh_init(void)
 {
     ssh_threads_set_callbacks(ssh_threads_get_pthread());
     ssh_init();
-    ssh_set_log_level(verbose_level);
 }
 
 static void

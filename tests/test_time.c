@@ -12,6 +12,7 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
+#include <inttypes.h>
 #include <stdarg.h>
 #include <stddef.h>
 #include <setjmp.h>
@@ -72,8 +73,13 @@ test_2datetime(void **state)
     assert_ptr_not_equal(NULL, nc_time2datetime(t, "Asia/Vladivostok", buf));
     assert_string_equal(buf, "2010-02-28T22:34:56+10:00");
 
+    assert_ptr_not_equal(NULL, nc_time2datetime(t, "CET", buf));
+    assert_string_equal(buf, "2010-02-28T13:34:56+01:00");
+
+#if __WORDSIZE == 64
     /* negative years are prohibited */
     assert_ptr_equal(NULL, nc_time2datetime(-69999999999, NULL, buf));
+#endif
 
     /* unknown timezone -> UTC */
     assert_ptr_not_equal(NULL, nc_time2datetime(t, "xxx", buf));
