@@ -958,13 +958,14 @@ nc_write_error(struct wclb_arg *arg, struct nc_server_error *err)
 
 /* return -1 can change session status */
 int
-nc_write_msg(struct nc_session *session, NC_MSG_TYPE type, ...)
+nc_write_msg(struct nc_session *session, int type, ...)
 {
     va_list ap;
     int count;
     const char *attrs;
     struct lyd_node *content;
     struct lyxml_elem *rpc_elem;
+    struct nc_server_notif *notif;
     struct nc_server_reply *reply;
     struct nc_server_reply_error *error_rpl;
     char *buf = NULL;
@@ -985,13 +986,14 @@ nc_write_msg(struct nc_session *session, NC_MSG_TYPE type, ...)
     arg.session = session;
     arg.len = 0;
 
+
     switch (type) {
     case NC_MSG_RPC:
         content = va_arg(ap, struct lyd_node *);
         attrs = va_arg(ap, const char *);
 
         count = asprintf(&buf, "<rpc xmlns=\"%s\" message-id=\"%"PRIu64"\"%s>",
-                         NC_NS_BASE, session->msgid + 1, attrs ? attrs : "");
+                         NC_NS_BASE, session->opts.client.msgid + 1, attrs ? attrs : "");
         if (count == -1) {
             ERRMEM;
             va_end(ap);
@@ -999,10 +1001,11 @@ nc_write_msg(struct nc_session *session, NC_MSG_TYPE type, ...)
         }
         nc_write_clb((void *)&arg, buf, count, 0);
         free(buf);
-        lyd_print_clb(nc_write_xmlclb, (void *)&arg, content, LYD_XML, LYP_WITHSIBLINGS);
+
+        lyd_print_clb(nc_write_xmlclb, (void *)&arg, content, LYD_XML, LYP_WITHSIBLINGS | LYP_NETCONF_XML);
         nc_write_clb((void *)&arg, "</rpc>", 6, 0);
 
-        session->msgid++;
+        session->opts.client.msgid++;
         break;
 
     case NC_MSG_REPLY:
@@ -1039,8 +1042,8 @@ nc_write_msg(struct nc_session *session, NC_MSG_TYPE type, ...)
                 wd = LYP_WD_ALL_TAG;
                 break;
             }
-            lyd_print_clb(nc_write_xmlclb, (void *)&arg, ((struct nc_reply_data *)reply)->data->child, LYD_XML,
-                          LYP_WITHSIBLINGS | wd);
+            lyd_print_clb(nc_write_xmlclb, (void *)&arg, ((struct nc_reply_data *)reply)->data, LYD_XML,
+                          LYP_WITHSIBLINGS | LYP_NETCONF_XML | wd);
             break;
         case NC_RPL_ERROR:
             error_rpl = (struct nc_server_reply_error *)reply;
@@ -1058,8 +1061,13 @@ nc_write_msg(struct nc_session *session, NC_MSG_TYPE type, ...)
         break;
 
     case NC_MSG_NOTIF:
-        nc_write_clb((void *)&arg, "<notification xmlns=\""NC_NS_NOTIF"\"/>", 21 + 47 + 3, 0);
-        /* TODO content */
+        notif = va_arg(ap, struct nc_server_notif *);
+
+        nc_write_clb((void *)&arg, "<notification xmlns=\""NC_NS_NOTIF"\">", 21 + 47 + 2, 0);
+        nc_write_clb((void *)&arg, "<eventTime>", 11, 0);
+        nc_write_clb((void *)&arg, notif->eventtime, strlen(notif->eventtime), 0);
+        nc_write_clb((void *)&arg, "</eventTime>", 12, 0);
+        lyd_print_clb(nc_write_xmlclb, (void *)&arg, notif->tree, LYD_XML, 0);
         nc_write_clb((void *)&arg, "</notification>", 12, 0);
         break;
 

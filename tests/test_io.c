@@ -27,9 +27,9 @@
 #include <cmocka.h>
 #include <libyang/libyang.h>
 
+#include <messages_p.h>
 #include <session_p.h>
 #include <session_client.h>
-#include <messages_p.h>
 #include "config.h"
 
 struct wr {
@@ -62,7 +62,7 @@ setup_write(void **state)
 
     w->session->status = NC_STATUS_RUNNING;
     w->session->version = NC_VERSION_10;
-    w->session->msgid = 999;
+    w->session->opts.client.msgid = 999;
     w->session->ti_type = NC_TI_FD;
     w->session->ti.fd.in = STDIN_FILENO;
     w->session->ti.fd.out = STDOUT_FILENO;
