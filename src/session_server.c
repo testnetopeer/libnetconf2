@@ -1571,6 +1571,8 @@ nc_server_endpt_set_address_port(const char *endpt_name, const char *address, ui
     /* ENDPT LOCK */
     endpt = nc_server_endpt_lock_get(endpt_name, 0, &i);
     if (!endpt) {
+        /* BIND UNLOCK */
+        pthread_mutex_unlock(&server_opts.bind_lock);
         return -1;
     }
 
@@ -2737,7 +2739,7 @@ nc_ch_client_thread(void *arg)
     NC_MSG_TYPE msgtype;
     uint8_t cur_attempts = 0;
     uint16_t i;
-    char *cur_endpt_name;
+    char *cur_endpt_name = NULL;
     struct nc_ch_endpt *cur_endpt;
     struct nc_session *session;
     struct nc_ch_client *client;
@@ -2832,7 +2834,7 @@ nc_ch_client_thread(void *arg)
 
 cleanup:
     VRB("Call Home client \"%s\" thread exit.", data->client_name);
-
+    free(cur_endpt_name);
     free(data->client_name);
     free(data);
     return NULL;
