@@ -36,9 +36,12 @@ int nc_server_ch_add_client(const char *name, NC_TRANSPORT_IMPL ti);
  * @brief Drop any connections, stop connecting and remove a client.
  *
  * @param[in] name Client name. NULL matches all the clients.
+ * @param[in] ti Client transport protocol. NULL matches any protocol.
+ *               Redundant to set if \p name is set, client names are
+ *               unique disregarding their protocol.
  * @return 0 on success, -1 on not finding any match.
  */
-int nc_server_ch_del_client(const char *name);
+int nc_server_ch_del_client(const char *name, NC_TRANSPORT_IMPL ti);
 
 /**
  * @brief Add a new Call Home client endpoint.
@@ -149,7 +152,7 @@ int nc_server_ch_client_set_start_with(const char *client_name, NC_CH_START_WITH
  * @brief Set Call Home client overall max attempts.
  *
  * @param[in] client_name Existing Call Home client name.
- * @param[in] conn_type Call Home overall max reconnect attempts.
+ * @param[in] max_attempts Call Home overall max reconnect attempts.
  * @return 0 on success, -1 on error.
  */
 int nc_server_ch_client_set_max_attempts(const char *client_name, uint8_t max_attempts);
@@ -170,24 +173,45 @@ int nc_connect_ch_client_dispatch(const char *client_name,
 #ifdef NC_ENABLED_SSH
 
 /**
- * @brief Add Call Home SSH host keys the server will identify itself with. Any RSA, DSA, and
- *        ECDSA keys can be added. However, a maximum of one key of each type will be used
- *        during SSH authentication, later keys replacing earlier ones.
+ * @brief Add Call Home SSH host keys the server will identify itself with. Only the name is set, the key itself
+ *        wil be retrieved using a callback.
  *
  * @param[in] client_name Existing Call Home client name.
- * @param[in] privkey_path Path to a private key.
+ * @param[in] name Arbitrary name of the host key.
+ * @param[in] idx Optional index where to add the key. -1 adds at the end.
  * @return 0 on success, -1 on error.
  */
-int nc_server_ssh_ch_client_add_hostkey(const char *client_name, const char *privkey_path);
+int nc_server_ssh_ch_client_add_hostkey(const char *client_name, const char *name, int16_t idx);
 
 /**
  * @brief Delete Call Home SSH host keys. Their order is preserved.
  *
  * @param[in] client_name Existing Call Home client name.
- * @param[in] privkey_path Path to a private key. NULL matches all the keys.
+ * @param[in] name Name of the host key. NULL matches all the keys, but if \p idx != -1 then this must be NULL.
+ * @param[in] idx Index of the hostkey. -1 matches all indices, but if \p name != NULL then this must be -1.
  * @return 0 on success, -1 on error.
  */
-int nc_server_ssh_ch_client_del_hostkey(const char *client_name, const char *privkey_path);
+int nc_server_ssh_ch_client_del_hostkey(const char *client_name, const char *name, int16_t idx);
+
+/**
+ * @brief Move Call Home SSH host key.
+ *
+ * @param[in] client_name Exisitng Call Home client name.
+ * @param[in] key_mov Name of the host key that will be moved.
+ * @param[in] key_after Name of the key that will preceed \p key_mov. NULL if \p key_mov is to be moved at the beginning.
+ * @return 0 in success, -1 on error.
+ */
+int nc_server_ssh_ch_client_mov_hostkey(const char *client_name, const char *key_mov, const char *key_after);
+
+/**
+ * @brief Modify Call Home SSH host key.
+ *
+ * @param[in] endpt_name Exisitng endpoint name.
+ * @param[in] name Name of an existing host key.
+ * @param[in] new_name New name of the host key \p name.
+ * @return 0 in success, -1 on error.
+ */
+int nc_server_ssh_ch_client_mod_hostkey(const char *endpt_name, const char *name, const char *new_name);
 
 /**
  * @brief Set Call Home SSH banner the server will send to every client.
@@ -226,93 +250,37 @@ int nc_server_ssh_ch_client_set_auth_attempts(const char *client_name, uint16_t 
  */
 int nc_server_ssh_ch_client_set_auth_timeout(const char *client_name, uint16_t auth_timeout);
 
-/**
- * @brief Add an authorized Call Home client SSH public key. This public key can be used for
- *        publickey authentication afterwards.
- *
- * @param[in] client_name Existing Call Home client name.
- * @param[in] pubkey_path Path to the public key.
- * @param[in] username Username that the client with the public key must use.
- * @return 0 on success, -1 on error.
- */
-int nc_server_ssh_ch_client_add_authkey(const char *client_name, const char *pubkey_path, const char *username);
-
-/**
- * @brief Remove an authorized Call Home client SSH public key.
- *
- * @param[in] client_name Existing Call Home client name.
- * @param[in] pubkey_path Path to an authorized public key. NULL matches all the keys.
- * @param[in] username Username for an authorized public key. NULL matches all the usernames.
- * @return 0 on success, -1 on not finding any match.
- */
-int nc_server_ssh_ch_client_del_authkey(const char *client_name, const char *pubkey_path, const char *username);
-
 #endif /* NC_ENABLED_SSH */
 
 #ifdef NC_ENABLED_TLS
 
 /**
- * @brief Set server Call Home TLS certificate. Alternative to nc_tls_server_set_cert_path().
- *        There can only be one certificate for each key type, it is replaced if already set.
+ * @brief Set the server Call Home TLS certificate. Only the name is set, the certificate itself
+ *        wil be retrieved using a callback.
  *
  * @param[in] client_name Existing Call Home client name.
- * @param[in] cert Base64-encoded certificate in ASN.1 DER encoding.
+ * @param[in] name Arbitrary certificate name.
  * @return 0 on success, -1 on error.
  */
-int nc_server_tls_ch_client_set_cert(const char *client_name, const char *cert);
+int nc_server_tls_ch_client_set_server_cert(const char *client_name, const char *name);
 
 /**
- * @brief Set server Call Home TLS certificate. Alternative to nc_tls_server_set_cert().
- *        There can only be one certificate for each key type, it is replaced if already set.
+ * @brief Add a Call Home trusted certificate list. Can be both a CA or a client one.
  *
  * @param[in] client_name Existing Call Home client name.
- * @param[in] cert_path Path to a certificate file in PEM format.
+ * @param[in] name Arbitary name identifying this certificate list.
  * @return 0 on success, -1 on error.
  */
-int nc_server_tls_ch_client_set_cert_path(const char *client_name, const char *cert_path);
+int nc_server_tls_ch_client_add_trusted_cert_list(const char *client_name, const char *name);
 
 /**
- * @brief Set server Call Home TLS private key matching the certificate.
- *        Alternative to nc_server_tls_ch_client_set_key_path().
- *        There can only be one of every key type, it is replaced if already set.
+ * @brief Remove a set Call Home trusted certificate list. CRLs and CTN entries are not affected.
  *
  * @param[in] client_name Existing Call Home client name.
- * @param[in] privkey Base64-encoded certificate in ASN.1 DER encoding.
- * @param[in] is_rsa Whether \p privkey are the data of an RSA (1) or DSA (0) key.
- * @return 0 on success, -1 on error.
+ * @param[in] name Name of the certificate list to delete. NULL deletes all the lists.
+ * @return 0 on success, -1 on not found.
  */
-int nc_server_tls_ch_client_set_key(const char *client_name, const char *privkey, int is_rsa);
-
-/**
- * @brief Set server Call Home TLS private key matching the certificate.
- *        Alternative to nc_server_tls_ch_client_set_key().
- *        There can only be one of every key type, it is replaced if already set.
- *
- * @param[in] client_name Existing Call Home client name.
- * @param[in] privkey_path Path to a private key file in PEM format.
- * @return 0 on success, -1 on error.
- */
-int nc_server_tls_ch_client_set_key_path(const char *client_name, const char *privkey_path);
-
-/**
- * @brief Add a Call Home trusted certificate. Can be both a CA or a client one.
- *
- * @param[in] client_name Existing Call Home client name.
- * @param[in] cert_name Arbitary name identifying this certificate.
- * @param[in] cert Base64-enocded certificate in ASN.1 DER encoding.
- * @return 0 on success, -1 on error.
- */
-int nc_server_tls_ch_client_add_trusted_cert(const char *client_name, const char *cert_name, const char *cert);
-
-/**
- * @brief Add a Call Home trusted certificate. Can be both a CA or a client one.
- *
- * @param[in] client_name Existing Call Home client name.
- * @param[in] cert_name Arbitary name identifying this certificate.
- * @param[in] cert_path Path to a trusted certificate file in PEM format.
- * @return 0 on success, -1 on error.
- */
-int nc_server_tls_ch_client_add_trusted_cert_path(const char *client_name, const char *cert_name, const char *cert_path);
+int nc_server_tls_ch_client_del_trusted_cert_list(const char *client_name, const char *name);
 
 /**
  * @brief Set trusted Call Home Certificate Authority certificate locations. There
@@ -327,16 +295,6 @@ int nc_server_tls_ch_client_add_trusted_cert_path(const char *client_name, const
  * @return 0 on success, -1 on error.
  */
 int nc_server_tls_ch_client_set_trusted_ca_paths(const char *client_name, const char *ca_file, const char *ca_dir);
-
-/**
- * @brief Remove a set Call Home trusted certificate.
- *        CRLs and CTN entries are not affected.
- *
- * @param[in] client_name Existing Call Home client name.
- * @param[in] cert_name Name of the certificate to delete. NULL deletes all the certificates.
- * @return 0 on success, -1 on not found.
- */
-int nc_server_tls_ch_client_del_trusted_cert(const char *client_name, const char *cert_name);
 
 /**
  * @brief Set Call Home Certificate Revocation List locations. There can only be
@@ -359,20 +317,24 @@ int nc_server_tls_ch_client_set_crl_paths(const char *client_name, const char *c
 void nc_server_tls_ch_client_clear_crls(const char *client_name);
 
 /**
- * @brief Add a Call Home Cert-to-name entry.
+ * @brief Add a cert-to-name entry.
+ *
+ * It is possible to add an entry step-by-step, specifying first only \p ip and in later calls
+ * \p fingerprint, \p map_type, and optionally \p name spearately.
  *
  * @param[in] client_name Existing Call Home client name.
- * @param[in] id Priority of the entry.
- * @param[in] fingerprint Matching certificate fingerprint.
- * @param[in] map_type Type of username-certificate mapping.
- * @param[in] name Specific username if \p map_type == NC_TLS_CTN_SPECIFED. Must be NULL otherwise.
+ * @param[in] id Priority of the entry. It must be unique. If already exists, the entry with this id
+ *               is modified.
+ * @param[in] fingerprint Matching certificate fingerprint. If NULL, kept temporarily unset.
+ * @param[in] map_type Type of username-certificate mapping. If 0, kept temporarily unset.
+ * @param[in] name Specific username used only if \p map_type == NC_TLS_CTN_SPECIFED.
  * @return 0 on success, -1 on error.
  */
 int nc_server_tls_ch_client_add_ctn(const char *client_name, uint32_t id, const char *fingerprint,
                                     NC_TLS_CTN_MAPTYPE map_type, const char *name);
 
 /**
- * @brief Remove a Call Home Cert-to-name entry.
+ * @brief Remove a Call Home cert-to-name entry.
  *
  * @param[in] client_name Existing Call Home client name.
  * @param[in] id Priority of the entry. -1 matches all the priorities.
@@ -383,6 +345,23 @@ int nc_server_tls_ch_client_add_ctn(const char *client_name, uint32_t id, const 
  */
 int nc_server_tls_ch_client_del_ctn(const char *client_name, int64_t id, const char *fingerprint,
                                     NC_TLS_CTN_MAPTYPE map_type, const char *name);
+
+/**
+ * @brief Get a Call Home cert-to-name entry.
+ *
+ * If a parameter is NULL, it is ignored. If its dereferenced value is NULL,
+ * it is filled and returned. If the value is set, it is used as a filter.
+ * Returns first matching entry.
+ *
+ * @param[in] client_name Existing Call Home client name.
+ * @param[in,out] id Priority of the entry.
+ * @param[in,out] fingerprint Fingerprint fo the entry.
+ * @param[in,out] map_type Mapping type of the entry.
+ * @param[in,out] name Specific username for the entry.
+ * @return 0 on success, -1 on not finding any match.
+ */
+int nc_server_tls_ch_client_get_ctn(const char *client_name, uint32_t *id, char **fingerprint,
+                                    NC_TLS_CTN_MAPTYPE *map_type, char **name);
 
 #endif /* NC_ENABLED_TLS */
 
