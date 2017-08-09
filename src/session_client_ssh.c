@@ -44,28 +44,51 @@
 #include "session_client_ch.h"
 #include "libnetconf.h"
 
-static int sshauth_hostkey_check(const char *hostname, ssh_session session);
-static char *sshauth_password(const char *username, const char *hostname);
-static char *sshauth_interactive(const char *auth_name, const char *instruction, const char *prompt, int echo);
-static char *sshauth_privkey_passphrase(const char* privkey_path);
+struct nc_client_context *nc_client_context_location(void);
+int nc_session_new_ctx(struct nc_session *session, struct ly_ctx *ctx);
 
-extern struct nc_client_opts client_opts;
+#define client_opts nc_client_context_location()->opts
+#define ssh_opts nc_client_context_location()->ssh_opts
+#define ssh_ch_opts nc_client_context_location()->ssh_ch_opts
 
-static struct nc_client_ssh_opts ssh_opts = {
-    .auth_pref = {{NC_SSH_AUTH_INTERACTIVE, 3}, {NC_SSH_AUTH_PASSWORD, 2}, {NC_SSH_AUTH_PUBLICKEY, 1}},
-    .auth_hostkey_check = sshauth_hostkey_check,
-    .auth_password = sshauth_password,
-    .auth_interactive = sshauth_interactive,
-    .auth_privkey_passphrase = sshauth_privkey_passphrase
-};
+static FILE *
+open_tty_noecho(const char *path, struct termios *oldterm)
+{
+    struct termios newterm;
+    FILE *ret;
 
-static struct nc_client_ssh_opts ssh_ch_opts = {
-    .auth_pref = {{NC_SSH_AUTH_INTERACTIVE, 1}, {NC_SSH_AUTH_PASSWORD, 2}, {NC_SSH_AUTH_PUBLICKEY, 3}},
-    .auth_hostkey_check = sshauth_hostkey_check,
-    .auth_password = sshauth_password,
-    .auth_interactive = sshauth_interactive,
-    .auth_privkey_passphrase = sshauth_privkey_passphrase
-};
+    if (!(ret = fopen(path, "r"))) {
+        ERR("Unable to open the current terminal (%s).", strerror(errno));
+        return NULL;
+    }
+
+    if (tcgetattr(fileno(ret), oldterm)) {
+        ERR("Unable to get terminal settings (%s).", strerror(errno));
+        fclose(ret);
+        return NULL;
+    }
+
+    newterm = *oldterm;
+    newterm.c_lflag &= ~ECHO;
+    newterm.c_lflag &= ~ICANON;
+    tcflush(fileno(ret), TCIFLUSH);
+    if (tcsetattr(fileno(ret), TCSANOW, &newterm)) {
+        ERR("Unable to change terminal settings for hiding password (%s).", strerror(errno));
+        fclose(ret);
+        return NULL;
+    }
+
+    return ret;
+}
+
+static void
+restore_tty_close(FILE *tty, struct termios *oldterm)
+{
+    if (tcsetattr(fileno(tty), TCSANOW, oldterm) != 0) {
+        ERR("Unable to restore terminal settings (%s).", strerror(errno));
+    }
+    fclose(tty);
+}
 
 static void
 _nc_client_ssh_destroy_opts(struct nc_client_ssh_opts *opts)
@@ -78,6 +101,8 @@ _nc_client_ssh_destroy_opts(struct nc_client_ssh_opts *opts)
     }
     free(opts->keys);
     free(opts->username);
+    opts->keys = NULL;
+    opts->username = NULL;
 }
 
 void
@@ -182,8 +207,8 @@ finish:
 
 #endif /* ENABLE_DNSSEC */
 
-static int
-sshauth_hostkey_check(const char *hostname, ssh_session session)
+int
+sshauth_hostkey_check(const char *hostname, ssh_session session, void *UNUSED(priv))
 {
     char *hexa;
     int c, state, ret;
@@ -303,59 +328,43 @@ fail:
     return -1;
 }
 
-static char *
-sshauth_password(const char *username, const char *hostname)
+char *
+sshauth_password(const char *username, const char *hostname, void *UNUSED(priv))
 {
     char *buf;
-    int buflen = 1024, len = 0;
+    int buflen = 1024, len, ret;
     char c = 0;
-    struct termios newterm, oldterm;
+    struct termios oldterm;
     FILE *tty;
-
-    if (!(tty = fopen("/dev/tty", "r+"))) {
-        ERR("Unable to open the current terminal (%s).", strerror(errno));
-        return NULL;
-    }
-
-    if (tcgetattr(fileno(tty), &oldterm)) {
-        ERR("Unable to get terminal settings (%s).", strerror(errno));
-        fclose(tty);
-        return NULL;
-    }
-
-    fprintf(tty, "%s@%s password: ", username, hostname);
-    fflush(tty);
-
-    /* system("stty -echo"); */
-    newterm = oldterm;
-    newterm.c_lflag &= ~ECHO;
-    newterm.c_lflag &= ~ICANON;
-    tcflush(fileno(tty), TCIFLUSH);
-    if (tcsetattr(fileno(tty), TCSANOW, &newterm)) {
-        ERR("Unable to change terminal settings for hiding password (%s).", strerror(errno));
-        fclose(tty);
-        return NULL;
-    }
 
     buf = malloc(buflen * sizeof *buf);
     if (!buf) {
         ERRMEM;
-        fclose(tty);
         return NULL;
     }
 
+    if ((ret = ttyname_r(STDIN_FILENO, buf, buflen))) {
+        ERR("ttyname_r failed (%s).", strerror(ret));
+        free(buf);
+        return NULL;
+    }
+
+    if (!(tty = open_tty_noecho(buf, &oldterm))) {
+        free(buf);
+        return NULL;
+    }
+
+    fprintf(stdout, "%s@%s password: ", username, hostname);
+    fflush(stdout);
+
+    len = 0;
     while ((fread(&c, 1, 1, tty) == 1) && (c != '\n')) {
         if (len >= buflen - 1) {
             buflen *= 2;
             buf = nc_realloc(buf, buflen * sizeof *buf);
             if (!buf) {
                 ERRMEM;
-
-                /* restore terminal settings */
-                if (tcsetattr(fileno(tty), TCSANOW, &oldterm) != 0) {
-                    ERR("Unable to restore terminal settings (%s).", strerror(errno));
-                }
-                fclose(tty);
+                restore_tty_close(tty, &oldterm);
                 return NULL;
             }
         }
@@ -363,126 +372,19 @@ sshauth_password(const char *username, const char *hostname)
     }
     buf[len++] = 0; /* terminating null byte */
 
-    /* system ("stty echo"); */
-    if (tcsetattr(fileno(tty), TCSANOW, &oldterm)) {
-        ERR("Unable to restore terminal settings (%s).", strerror(errno));
-        /*
-         * terminal probably still hides input characters, but we have password
-         * and anyway we are unable to set terminal to the previous state, so
-         * just continue
-         */
-    }
-    fprintf(tty, "\n");
-
-    fclose(tty);
+    fprintf(stdout, "\n");
+    restore_tty_close(tty, &oldterm);
     return buf;
 }
 
-static char *
-sshauth_interactive(const char *auth_name, const char *instruction, const char *prompt, int echo)
+char *
+sshauth_interactive(const char *auth_name, const char *instruction, const char *prompt, int echo, void *UNUSED(priv))
 {
-    unsigned int buflen = 8, response_len;
+    unsigned int buflen = 64, cur_len;
     char c = 0;
-    struct termios newterm, oldterm;
-    char *response;
-    FILE *tty;
-
-    if (!(tty = fopen("/dev/tty", "r+"))) {
-        ERR("Unable to open the current terminal (%s).", strerror(errno));
-        return NULL;
-    }
-
-    if (tcgetattr(fileno(tty), &oldterm) != 0) {
-        ERR("Unable to get terminal settings (%s).", strerror(errno));
-        fclose(tty);
-        return NULL;
-    }
-
-    if (auth_name && (!fwrite(auth_name, sizeof(char), strlen(auth_name), tty)
-            || !fwrite("\n", sizeof(char), 1, tty))) {
-        ERR("Writing the auth method name into stdout failed.");
-        fclose(tty);
-        return NULL;
-    }
-
-    if (instruction && (!fwrite(instruction, sizeof(char), strlen(instruction), tty)
-            || !fwrite("\n", sizeof(char), 1, tty))) {
-        ERR("Writing the instruction into stdout failed.");
-        fclose(tty);
-        return NULL;
-    }
-
-    if (!fwrite(prompt, sizeof(char), strlen(prompt), tty)) {
-        ERR("Writing the authentication prompt into stdout failed.");
-        fclose(tty);
-        return NULL;
-    }
-    fflush(tty);
-    if (!echo) {
-        /* system("stty -echo"); */
-        newterm = oldterm;
-        newterm.c_lflag &= ~ECHO;
-        tcflush(fileno(tty), TCIFLUSH);
-        if (tcsetattr(fileno(tty), TCSANOW, &newterm)) {
-            ERR("Unable to change terminal settings for hiding password (%s).", strerror(errno));
-            fclose(tty);
-            return NULL;
-        }
-    }
-
-    response = malloc(buflen * sizeof *response);
-    response_len = 0;
-    if (!response) {
-        ERRMEM;
-        /* restore terminal settings */
-        if (tcsetattr(fileno(tty), TCSANOW, &oldterm)) {
-            ERR("Unable to restore terminal settings (%s).", strerror(errno));
-        }
-        fclose(tty);
-        return NULL;
-    }
-
-    while ((fread(&c, 1, 1, tty) == 1) && (c != '\n')) {
-        if (response_len >= buflen - 1) {
-            buflen *= 2;
-            response = nc_realloc(response, buflen * sizeof *response);
-            if (!response) {
-                ERRMEM;
-
-                /* restore terminal settings */
-                if (tcsetattr(fileno(tty), TCSANOW, &oldterm)) {
-                    ERR("Unable to restore terminal settings (%s).", strerror(errno));
-                }
-                fclose(tty);
-                return NULL;
-            }
-        }
-        response[response_len++] = c;
-    }
-    /* terminating null byte */
-    response[response_len++] = '\0';
-
-    /* system ("stty echo"); */
-    if (tcsetattr(fileno(tty), TCSANOW, &oldterm)) {
-        ERR("Unable to restore terminal settings (%s).", strerror(errno));
-        /*
-         * terminal probably still hides input characters, but we have password
-         * and anyway we are unable to set terminal to the previous state, so
-         * just continue
-         */
-    }
-
-    fprintf(tty, "\n");
-    fclose(tty);
-    return response;
-}
-
-static char *
-sshauth_privkey_passphrase(const char* privkey_path)
-{
-    char c, *buf;
-    int buflen = 1024, len = 0;
-    struct termios newterm, oldterm;
+    int ret;
+    struct termios oldterm;
+    char *buf;
     FILE *tty;
 
     buf = malloc(buflen * sizeof *buf);
@@ -491,162 +393,336 @@ sshauth_privkey_passphrase(const char* privkey_path)
         return NULL;
     }
 
-    if (!(tty = fopen("/dev/tty", "r+"))) {
-        ERR("Unable to open the current terminal (%s).", strerror(errno));
-        goto fail;
+    if ((ret = ttyname_r(STDIN_FILENO, buf, buflen))) {
+        ERR("ttyname_r failed (%s).", strerror(ret));
+        free(buf);
+        return NULL;
     }
 
-    if (tcgetattr(fileno(tty), &oldterm)) {
-        ERR("Unable to get terminal settings (%s).", strerror(errno));
-        goto fail;
+    if (!echo) {
+        if (!(tty = open_tty_noecho(buf, &oldterm))) {
+            free(buf);
+            return NULL;
+        }
+    } else {
+        tty = stdin;
     }
 
-    fprintf(tty, "Enter passphrase for the key '%s':", privkey_path);
-    fflush(tty);
 
-    /* system("stty -echo"); */
-    newterm = oldterm;
-    newterm.c_lflag &= ~ECHO;
-    newterm.c_lflag &= ~ICANON;
-    tcflush(fileno(tty), TCIFLUSH);
-    if (tcsetattr(fileno(tty), TCSANOW, &newterm)) {
-        ERR("Unable to change terminal settings for hiding password (%s).", strerror(errno));
+    if (auth_name && (!fwrite(auth_name, sizeof *auth_name, strlen(auth_name), stdout)
+            || !fwrite("\n", sizeof(char), 1, stdout))) {
+        ERR("Writing the auth method name into stdout failed.");
         goto fail;
     }
+    if (instruction && (!fwrite(instruction, sizeof *auth_name, strlen(instruction), stdout)
+            || !fwrite("\n", sizeof(char), 1, stdout))) {
+        ERR("Writing the instruction into stdout failed.");
+        goto fail;
+    }
+    if (!fwrite(prompt, sizeof *prompt, strlen(prompt), stdout)) {
+        ERR("Writing the authentication prompt into stdout failed.");
+        goto fail;
+    }
+    fflush(stdout);
 
+    cur_len = 0;
+    while ((fread(&c, 1, 1, tty) == 1) && (c != '\n')) {
+        if (cur_len >= buflen - 1) {
+            buflen *= 2;
+            buf = nc_realloc(buf, buflen * sizeof *buf);
+            if (!buf) {
+                ERRMEM;
+                goto fail;
+            }
+        }
+        buf[cur_len++] = c;
+    }
+    /* terminating null byte */
+    buf[cur_len] = '\0';
+
+    fprintf(stdout, "\n");
+    if (!echo) {
+        restore_tty_close(tty, &oldterm);
+    }
+    return buf;
+
+fail:
+    if (!echo) {
+        restore_tty_close(tty, &oldterm);
+    }
+    free(buf);
+    return NULL;
+}
+
+char *
+sshauth_privkey_passphrase(const char* privkey_path, void *UNUSED(priv))
+{
+    char c, *buf;
+    int buflen = 1024, len, ret;
+    struct termios oldterm;
+    FILE *tty;
+
+    buf = malloc(buflen * sizeof *buf);
+    if (!buf) {
+        ERRMEM;
+        return NULL;
+    }
+
+    if ((ret = ttyname_r(STDIN_FILENO, buf, buflen))) {
+        ERR("ttyname_r failed (%s).", strerror(ret));
+        free(buf);
+        return NULL;
+    }
+
+    if (!(tty = open_tty_noecho(buf, &oldterm))) {
+        free(buf);
+        return NULL;
+    }
+
+    fprintf(stdout, "Enter passphrase for the key '%s':", privkey_path);
+    fflush(stdout);
+
+    len = 0;
     while ((fread(&c, 1, 1, tty) == 1) && (c != '\n')) {
         if (len >= buflen - 1) {
             buflen *= 2;
             buf = nc_realloc(buf, buflen * sizeof *buf);
             if (!buf) {
                 ERRMEM;
-                /* restore terminal settings */
-                if (tcsetattr(fileno(tty), TCSANOW, &oldterm)) {
-                    ERR("Unable to restore terminal settings (%s).", strerror(errno));
-                }
                 goto fail;
             }
         }
         buf[len++] = (char)c;
     }
-    buf[len++] = 0; /* terminating null byte */
+    buf[len] = 0; /* terminating null byte */
 
-    /* system ("stty echo"); */
-    if (tcsetattr(fileno(tty), TCSANOW, &oldterm)) {
-        ERR("Unable to restore terminal settings (%s).", strerror(errno));
-        /*
-         * terminal probably still hides input characters, but we have password
-         * and anyway we are unable to set terminal to the previous state, so
-         * just continue
-         */
-    }
-    fprintf(tty, "\n");
-
-    fclose(tty);
+    fprintf(stdout, "\n");
+    restore_tty_close(tty, &oldterm);
     return buf;
 
 fail:
+    restore_tty_close(tty, &oldterm);
     free(buf);
-    if (tty) {
-        fclose(tty);
-    }
     return NULL;
 }
 
 static void
-_nc_client_ssh_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session),
-                                     struct nc_client_ssh_opts *opts)
+_nc_client_ssh_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
+                                          void *priv, struct nc_client_ssh_opts *opts)
 {
     if (auth_hostkey_check) {
         opts->auth_hostkey_check = auth_hostkey_check;
+        opts->auth_hostkey_check_priv = priv;
     } else {
         opts->auth_hostkey_check = sshauth_hostkey_check;
+        opts->auth_hostkey_check_priv = NULL;
     }
 }
 
-API void
-nc_client_ssh_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session))
+static void
+_nc_client_ssh_get_auth_hostkey_check_clb(int (**auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
+                                         void **priv, struct nc_client_ssh_opts *opts)
 {
-    _nc_client_ssh_set_auth_hostkey_check_clb(auth_hostkey_check, &ssh_opts);
+    if (auth_hostkey_check) {
+        (*auth_hostkey_check) = opts->auth_hostkey_check == sshauth_hostkey_check ? NULL : opts->auth_hostkey_check;
+    }
+    if (priv) {
+        (*priv) = opts->auth_hostkey_check_priv;
+    }
+}
+
+
+API void
+nc_client_ssh_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
+                                         void *priv)
+{
+    _nc_client_ssh_set_auth_hostkey_check_clb(auth_hostkey_check, priv, &ssh_opts);
 }
 
 API void
-nc_client_ssh_ch_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session))
+nc_client_ssh_ch_set_auth_hostkey_check_clb(int (*auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
+                                            void *priv)
 {
-    _nc_client_ssh_set_auth_hostkey_check_clb(auth_hostkey_check, &ssh_ch_opts);
+    _nc_client_ssh_set_auth_hostkey_check_clb(auth_hostkey_check, priv, &ssh_ch_opts);
 }
 
+API void
+nc_client_ssh_get_auth_hostkey_check_clb(int (**auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
+                                         void **priv)
+{
+    _nc_client_ssh_get_auth_hostkey_check_clb(auth_hostkey_check, priv, &ssh_opts);
+}
+
+API void
+nc_client_ssh_ch_get_auth_hostkey_check_clb(int (**auth_hostkey_check)(const char *hostname, ssh_session session, void *priv),
+                                            void **priv)
+{
+    _nc_client_ssh_get_auth_hostkey_check_clb(auth_hostkey_check, priv, &ssh_ch_opts);
+}
 
 static void
-_nc_client_ssh_set_auth_password_clb(char *(*auth_password)(const char *username, const char *hostname),
-                                     struct nc_client_ssh_opts *opts)
+_nc_client_ssh_set_auth_password_clb(char *(*auth_password)(const char *username, const char *hostname, void *priv),
+                                     void *priv, struct nc_client_ssh_opts *opts)
 {
     if (auth_password) {
         opts->auth_password = auth_password;
+        opts->auth_password_priv = priv;
     } else {
         opts->auth_password = sshauth_password;
+        opts->auth_password_priv = NULL;
+    }
+}
+
+static void
+_nc_client_ssh_get_auth_password_clb(char *(**auth_password)(const char *username, const char *hostname, void *priv),
+                                     void **priv, struct nc_client_ssh_opts *opts)
+{
+    if (auth_password) {
+        (*auth_password) = opts->auth_password == sshauth_password ? NULL : opts->auth_password;
+    }
+    if (priv) {
+        (*priv) = opts->auth_password_priv;
     }
 }
 
 API void
-nc_client_ssh_set_auth_password_clb(char *(*auth_password)(const char *username, const char *hostname))
+nc_client_ssh_set_auth_password_clb(char *(*auth_password)(const char *username, const char *hostname, void *priv),
+                                    void *priv)
 {
-    _nc_client_ssh_set_auth_password_clb(auth_password, &ssh_opts);
+    _nc_client_ssh_set_auth_password_clb(auth_password, priv, &ssh_opts);
 }
 
 API void
-nc_client_ssh_ch_set_auth_password_clb(char *(*auth_password)(const char *username, const char *hostname))
+nc_client_ssh_ch_set_auth_password_clb(char *(*auth_password)(const char *username, const char *hostname, void *priv),
+                                       void *priv)
 {
-    _nc_client_ssh_set_auth_password_clb(auth_password, &ssh_ch_opts);
+    _nc_client_ssh_set_auth_password_clb(auth_password, priv, &ssh_ch_opts);
+}
+
+API void
+nc_client_ssh_get_auth_password_clb(char *(**auth_password)(const char *username, const char *hostname, void *priv),
+                                    void **priv)
+{
+    _nc_client_ssh_get_auth_password_clb(auth_password, priv, &ssh_opts);
+}
+
+API void
+nc_client_ssh_ch_get_auth_password_clb(char *(**auth_password)(const char *username, const char *hostname, void *priv),
+                                       void **priv)
+{
+    _nc_client_ssh_get_auth_password_clb(auth_password, priv, &ssh_ch_opts);
 }
 
 static void
 _nc_client_ssh_set_auth_interactive_clb(char *(*auth_interactive)(const char *auth_name, const char *instruction,
-                                                                  const char *prompt, int echo),
-                                        struct nc_client_ssh_opts *opts)
+                                                                  const char *prompt, int echo, void *priv),
+                                        void *priv, struct nc_client_ssh_opts *opts)
 {
     if (auth_interactive) {
         opts->auth_interactive = auth_interactive;
+        opts->auth_interactive_priv = priv;
     } else {
         opts->auth_interactive = sshauth_interactive;
+        opts->auth_interactive_priv = NULL;
+    }
+}
+
+static void
+_nc_client_ssh_get_auth_interactive_clb(char *(**auth_interactive)(const char *auth_name, const char *instruction,
+                                                                  const char *prompt, int echo, void *priv),
+                                        void **priv, struct nc_client_ssh_opts *opts)
+{
+    if (auth_interactive) {
+        (*auth_interactive) = opts->auth_interactive == sshauth_interactive ? NULL : opts->auth_interactive;
+    }
+    if (priv) {
+        (*priv) = opts->auth_interactive_priv;
     }
 }
 
 API void
 nc_client_ssh_set_auth_interactive_clb(char *(*auth_interactive)(const char *auth_name, const char *instruction,
-                                                                  const char *prompt, int echo))
+                                                                  const char *prompt, int echo, void *priv),
+                                       void *priv)
 {
-    _nc_client_ssh_set_auth_interactive_clb(auth_interactive, &ssh_opts);
+    _nc_client_ssh_set_auth_interactive_clb(auth_interactive, priv, &ssh_opts);
 }
 
 API void
 nc_client_ssh_ch_set_auth_interactive_clb(char *(*auth_interactive)(const char *auth_name, const char *instruction,
-                                                                  const char *prompt, int echo))
+                                                                  const char *prompt, int echo, void *priv),
+                                          void *priv)
 {
-    _nc_client_ssh_set_auth_interactive_clb(auth_interactive, &ssh_ch_opts);
+    _nc_client_ssh_set_auth_interactive_clb(auth_interactive, priv, &ssh_ch_opts);
+}
+
+API void
+nc_client_ssh_get_auth_interactive_clb(char *(**auth_interactive)(const char *auth_name, const char *instruction,
+                                                                  const char *prompt, int echo, void *priv),
+                                       void **priv)
+{
+    _nc_client_ssh_get_auth_interactive_clb(auth_interactive, priv, &ssh_opts);
+}
+
+API void
+nc_client_ssh_ch_get_auth_interactive_clb(char *(**auth_interactive)(const char *auth_name, const char *instruction,
+                                                                  const char *prompt, int echo, void *priv),
+                                          void **priv)
+{
+    _nc_client_ssh_get_auth_interactive_clb(auth_interactive, priv, &ssh_ch_opts);
 }
 
 static void
-_nc_client_ssh_set_auth_privkey_passphrase_clb(char *(*auth_privkey_passphrase)(const char *privkey_path),
-                                        struct nc_client_ssh_opts *opts)
+_nc_client_ssh_set_auth_privkey_passphrase_clb(char *(*auth_privkey_passphrase)(const char *privkey_path, void *priv),
+                                               void *priv, struct nc_client_ssh_opts *opts)
 {
     if (auth_privkey_passphrase) {
         opts->auth_privkey_passphrase = auth_privkey_passphrase;
+        opts->auth_privkey_passphrase_priv = priv;
     } else {
         opts->auth_privkey_passphrase = sshauth_privkey_passphrase;
+        opts->auth_privkey_passphrase_priv = NULL;
+    }
+}
+
+static void
+_nc_client_ssh_get_auth_privkey_passphrase_clb(char *(**auth_privkey_passphrase)(const char *privkey_path, void *priv),
+                                               void **priv, struct nc_client_ssh_opts *opts)
+{
+    if (auth_privkey_passphrase) {
+        (*auth_privkey_passphrase) = opts->auth_privkey_passphrase == sshauth_privkey_passphrase ? NULL : opts->auth_privkey_passphrase;
+    }
+    if (priv) {
+        (*priv) = opts->auth_privkey_passphrase_priv;
     }
 }
 
 API void
-nc_client_ssh_set_auth_privkey_passphrase_clb(char *(*auth_privkey_passphrase)(const char *privkey_path))
+nc_client_ssh_set_auth_privkey_passphrase_clb(char *(*auth_privkey_passphrase)(const char *privkey_path, void *priv),
+                                              void *priv)
 {
-    _nc_client_ssh_set_auth_privkey_passphrase_clb(auth_privkey_passphrase, &ssh_opts);
+    _nc_client_ssh_set_auth_privkey_passphrase_clb(auth_privkey_passphrase, priv, &ssh_opts);
 }
 
 API void
-nc_client_ssh_ch_set_auth_privkey_passphrase_clb(char *(*auth_privkey_passphrase)(const char *privkey_path))
+nc_client_ssh_ch_set_auth_privkey_passphrase_clb(char *(*auth_privkey_passphrase)(const char *privkey_path, void *priv),
+                                                 void *priv)
 {
-    _nc_client_ssh_set_auth_privkey_passphrase_clb(auth_privkey_passphrase, &ssh_ch_opts);
+    _nc_client_ssh_set_auth_privkey_passphrase_clb(auth_privkey_passphrase, priv, &ssh_ch_opts);
+}
+
+API void
+nc_client_ssh_get_auth_privkey_passphrase_clb(char *(**auth_privkey_passphrase)(const char *privkey_path, void *priv),
+                                              void **priv)
+{
+    _nc_client_ssh_get_auth_privkey_passphrase_clb(auth_privkey_passphrase, priv, &ssh_opts);
+}
+
+API void
+nc_client_ssh_ch_get_auth_privkey_passphrase_clb(char *(**auth_privkey_passphrase)(const char *privkey_path, void *priv),
+                                                 void **priv)
+{
+    _nc_client_ssh_get_auth_privkey_passphrase_clb(auth_privkey_passphrase, priv, &ssh_ch_opts);
 }
 
 static int
@@ -976,7 +1052,7 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
         return -1;
     }
 
-    if (opts->auth_hostkey_check(session->host, ssh_sess)) {
+    if (opts->auth_hostkey_check(session->host, ssh_sess, opts->auth_hostkey_check_priv)) {
         ERR("Checking the host key failed.");
         return -1;
     }
@@ -1045,7 +1121,7 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
             userauthlist &= ~SSH_AUTH_METHOD_PASSWORD;
 
             VRB("Password authentication (host \"%s\", user \"%s\").", session->host, session->username);
-            s = opts->auth_password(session->username, session->host);
+            s = opts->auth_password(session->username, session->host, opts->auth_password_priv);
 
             if (timeout > -1) {
                 nc_gettimespec(&ts_timeout);
@@ -1098,7 +1174,7 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
 
                     answer = opts->auth_interactive(ssh_userauth_kbdint_getname(ssh_sess),
                                                     ssh_userauth_kbdint_getinstruction(ssh_sess),
-                                                    prompt, echo);
+                                                    prompt, echo, opts->auth_interactive_priv);
                     if (ssh_userauth_kbdint_setanswer(ssh_sess, j, answer) < 0) {
                         free(answer);
                         ret_auth = SSH_AUTH_ERROR;
@@ -1163,7 +1239,7 @@ connect_ssh_session(struct nc_session *session, struct nc_client_ssh_opts *opts,
                 }
 
                 if (opts->keys[j].privkey_crypt) {
-                    s = opts->auth_privkey_passphrase(opts->keys[j].privkey_path);
+                    s = opts->auth_privkey_passphrase(opts->keys[j].privkey_path, opts->auth_privkey_passphrase_priv);
                 } else {
                     s = NULL;
                 }
@@ -1410,22 +1486,10 @@ _nc_connect_libssh(ssh_session ssh_session, struct ly_ctx *ctx, struct nc_client
      * SSH session is established and netconf channel opened, create a NETCONF session. (Application layer)
      */
 
-    /* assign context (dicionary needed for handshake) */
-    if (!ctx) {
-        if (client_opts.schema_searchpath) {
-            ctx = ly_ctx_new(client_opts.schema_searchpath);
-        } else {
-            ctx = ly_ctx_new(SCHEMAS_DIR);
-        }
-        /* definitely should not happen, but be ready */
-        if (!ctx && !(ctx = ly_ctx_new(NULL))) {
-            /* that's just it */
-            goto fail;
-        }
-    } else {
-        session->flags |= NC_SESSION_SHAREDCTX;
+    if (nc_session_new_ctx(session, ctx) != EXIT_SUCCESS) {
+        goto fail;
     }
-    session->ctx = ctx;
+    ctx = session->ctx;
 
     /* NETCONF handshake */
     if (nc_handshake(session) != NC_MSG_HELLO) {
@@ -1538,22 +1602,10 @@ nc_connect_ssh(const char *host, uint16_t port, struct ly_ctx *ctx)
         goto fail;
     }
 
-    /* assign context (dicionary needed for handshake) */
-    if (!ctx) {
-        if (client_opts.schema_searchpath) {
-            ctx = ly_ctx_new(client_opts.schema_searchpath);
-        } else {
-            ctx = ly_ctx_new(SCHEMAS_DIR);
-        }
-        /* definitely should not happen, but be ready */
-        if (!ctx && !(ctx = ly_ctx_new(NULL))) {
-            /* that's just it */
-            goto fail;
-        }
-    } else {
-        session->flags |= NC_SESSION_SHAREDCTX;
+    if (nc_session_new_ctx(session, ctx) != EXIT_SUCCESS) {
+        goto fail;
     }
-    session->ctx = ctx;
+    ctx = session->ctx;
 
     /* NETCONF handshake */
     if (nc_handshake(session) != NC_MSG_HELLO) {
@@ -1619,17 +1671,10 @@ nc_connect_ssh_channel(struct nc_session *session, struct ly_ctx *ctx)
         goto fail;
     }
 
-    /* assign context (dicionary needed for handshake) */
-    if (!ctx) {
-        if (client_opts.schema_searchpath) {
-            ctx = ly_ctx_new(client_opts.schema_searchpath);
-        } else {
-            ctx = ly_ctx_new(SCHEMAS_DIR);
-        }
-    } else {
-        new_session->flags |= NC_SESSION_SHAREDCTX;
+    if (nc_session_new_ctx(session, ctx) != EXIT_SUCCESS) {
+        goto fail;
     }
-    new_session->ctx = ctx;
+    ctx = session->ctx;
 
     /* NETCONF handshake */
     if (nc_handshake(new_session) != NC_MSG_HELLO) {

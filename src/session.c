@@ -19,6 +19,7 @@
 #include <pthread.h>
 #include <sys/time.h>
 #include <time.h>
+#include <ctype.h>
 #include <libyang/libyang.h>
 
 #include "session.h"
@@ -41,6 +42,7 @@
 
 /* in seconds */
 #define NC_CLIENT_HELLO_TIMEOUT 60
+#define NC_SERVER_HELLO_TIMEOUT 60
 
 /* in milliseconds */
 #define NC_CLOSE_REPLY_TIMEOUT 200
@@ -67,7 +69,7 @@ nc_gettimespec(struct timespec *ts)
 
 /* ts1 < ts2 -> +, ts1 > ts2 -> -, returns milliseconds */
 int32_t
-nc_difftimespec(struct timespec *ts1, struct timespec *ts2)
+nc_difftimespec(const struct timespec *ts1, const struct timespec *ts2)
 {
     int64_t nsec_diff = 0;
 
@@ -285,21 +287,32 @@ nc_session_get_status(const struct nc_session *session)
 {
     if (!session) {
         ERRARG("session");
-        return 0;
+        return NC_STATUS_ERR;
     }
 
     return session->status;
 }
 
 API NC_SESSION_TERM_REASON
-nc_session_get_termreason(const struct nc_session *session)
+nc_session_get_term_reason(const struct nc_session *session)
+{
+    if (!session) {
+        ERRARG("session");
+        return NC_SESSION_TERM_ERR;
+    }
+
+    return session->term_reason;
+}
+
+API uint32_t
+nc_session_get_killed_by(const struct nc_session *session)
 {
     if (!session) {
         ERRARG("session");
         return 0;
     }
 
-    return session->term_reason;
+    return session->killed_by;
 }
 
 API uint32_t
@@ -519,7 +532,7 @@ nc_session_free(struct nc_session *session, void (*data_free)(void *))
         /* list of server's capabilities */
         if (session->opts.client.cpblts) {
             for (i = 0; session->opts.client.cpblts[i]; i++) {
-                lydict_remove(session->ctx, session->opts.client.cpblts[i]);
+                free(session->opts.client.cpblts[i]);
             }
             free(session->opts.client.cpblts);
         }
@@ -934,11 +947,11 @@ nc_server_get_cpblts(struct ly_ctx *ctx)
 }
 
 static int
-parse_cpblts(struct lyxml_elem *xml, const char ***list)
+parse_cpblts(struct lyxml_elem *xml, char ***list)
 {
     struct lyxml_elem *cpblt;
-    int ver = -1;
-    int i = 0;
+    int ver = -1, i = 0;
+    const char *cpb_start, *cpb_end;
 
     if (list) {
         /* get the storage for server's capabilities */
@@ -963,17 +976,28 @@ parse_cpblts(struct lyxml_elem *xml, const char ***list)
             continue;
         }
 
+        /* skip leading/trailing whitespaces */
+        for (cpb_start = cpblt->content; isspace(cpb_start[0]); ++cpb_start);
+        for (cpb_end = cpblt->content + strlen(cpblt->content); (cpb_end > cpblt->content) && isspace(cpb_end[-1]); --cpb_end);
+        if (!cpb_start[0] || (cpb_end == cpblt->content)) {
+            ERR("Empty capability \"%s\" received.", cpblt->content);
+            return -1;
+        }
+
         /* detect NETCONF version */
-        if (ver < 0 && !strcmp(cpblt->content, "urn:ietf:params:netconf:base:1.0")) {
+        if (ver < 0 && !strncmp(cpb_start, "urn:ietf:params:netconf:base:1.0", cpb_end - cpb_start)) {
             ver = 0;
-        } else if (ver < 1 && !strcmp(cpblt->content, "urn:ietf:params:netconf:base:1.1")) {
+        } else if (ver < 1 && !strncmp(cpb_start, "urn:ietf:params:netconf:base:1.1", cpb_end - cpb_start)) {
             ver = 1;
         }
 
         /* store capabilities */
         if (list) {
-            (*list)[i] = cpblt->content;
-            cpblt->content = NULL;
+            (*list)[i] = strndup(cpb_start, cpb_end - cpb_start);
+            if (!(*list)[i]) {
+                ERRMEM;
+                return -1;
+            }
             i++;
         }
     }
@@ -1123,7 +1147,7 @@ nc_recv_server_hello(struct nc_session *session)
     int ver = -1;
     int flag = 0;
 
-    msgtype = nc_read_msg_poll(session, (server_opts.hello_timeout ? server_opts.hello_timeout * 1000 : -1), &xml);
+    msgtype = nc_read_msg_poll(session, (server_opts.hello_timeout ? server_opts.hello_timeout * 1000 : NC_SERVER_HELLO_TIMEOUT * 1000), &xml);
 
     switch (msgtype) {
     case NC_MSG_HELLO:
