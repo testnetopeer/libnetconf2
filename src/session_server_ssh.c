@@ -13,7 +13,6 @@
  */
 
 #define _GNU_SOURCE
-#define _POSIX_SOURCE
 
 #include <stdlib.h>
 #include <string.h>
@@ -23,10 +22,15 @@
 #include <shadow.h>
 #include <crypt.h>
 #include <errno.h>
+#include <time.h>
 
 #include "session_server.h"
 #include "session_server_ch.h"
 #include "libnetconf.h"
+
+#if !defined(HAVE_CRYPT_R)
+pthread_mutex_t crypt_lock = PTHREAD_MUTEX_INITIALIZER;
+#endif
 
 extern struct nc_server_opts server_opts;
 
@@ -751,7 +755,9 @@ static int
 auth_password_compare_pwd(const char *pass_hash, const char *pass_clear)
 {
     char *new_pass_hash;
+#if defined(HAVE_CRYPT_R)
     struct crypt_data cdata;
+#endif
 
     if (!pass_hash[0]) {
         if (!pass_clear[0]) {
@@ -764,8 +770,14 @@ auth_password_compare_pwd(const char *pass_hash, const char *pass_clear)
         }
     }
 
+#if defined(HAVE_CRYPT_R)
     cdata.initialized = 0;
     new_pass_hash = crypt_r(pass_clear, pass_hash, &cdata);
+#else
+    pthread_mutex_lock(&crypt_lock);
+    new_pass_hash = crypt(pass_clear, pass_hash);
+    pthread_mutex_unlock(&crypt_lock);
+#endif
     return strcmp(new_pass_hash, pass_hash);
 }
 
@@ -1238,7 +1250,7 @@ nc_open_netconf_channel(struct nc_session *session, int timeout)
     }
 
     if (timeout > -1) {
-        nc_gettimespec(&ts_timeout);
+        nc_gettimespec_mono(&ts_timeout);
         nc_addtimespec(&ts_timeout, timeout);
     }
     while (1) {
@@ -1266,7 +1278,7 @@ nc_open_netconf_channel(struct nc_session *session, int timeout)
 
         usleep(NC_TIMEOUT_STEP);
         if (timeout > -1) {
-            nc_gettimespec(&ts_cur);
+            nc_gettimespec_mono(&ts_cur);
             if (nc_difftimespec(&ts_cur, &ts_timeout) < 1) {
                 /* timeout */
                 ERR("Failed to start \"netconf\" SSH subsystem for too long, disconnecting.");
@@ -1388,14 +1400,14 @@ nc_accept_ssh_session(struct nc_session *session, int sock, int timeout)
     ssh_set_blocking(session->ti.libssh.session, 0);
 
     if (timeout > -1) {
-        nc_gettimespec(&ts_timeout);
+        nc_gettimespec_mono(&ts_timeout);
         nc_addtimespec(&ts_timeout, timeout);
     }
     while ((ret = ssh_handle_key_exchange(session->ti.libssh.session)) == SSH_AGAIN) {
         /* this tends to take longer */
         usleep(NC_TIMEOUT_STEP * 20);
         if (timeout > -1) {
-            nc_gettimespec(&ts_cur);
+            nc_gettimespec_mono(&ts_cur);
             if (nc_difftimespec(&ts_cur, &ts_timeout) < 1) {
                 break;
             }
@@ -1411,7 +1423,7 @@ nc_accept_ssh_session(struct nc_session *session, int sock, int timeout)
 
     /* authenticate */
     if (opts->auth_timeout) {
-        nc_gettimespec(&ts_timeout);
+        nc_gettimespec_mono(&ts_timeout);
         nc_addtimespec(&ts_timeout, opts->auth_timeout * 1000);
     }
     while (1) {
@@ -1437,7 +1449,7 @@ nc_accept_ssh_session(struct nc_session *session, int sock, int timeout)
 
         usleep(NC_TIMEOUT_STEP);
         if (opts->auth_timeout) {
-            nc_gettimespec(&ts_cur);
+            nc_gettimespec_mono(&ts_cur);
             if (nc_difftimespec(&ts_cur, &ts_timeout) < 1) {
                 /* timeout */
                 break;
@@ -1470,6 +1482,7 @@ nc_session_accept_ssh_channel(struct nc_session *orig_session, struct nc_session
 {
     NC_MSG_TYPE msgtype;
     struct nc_session *new_session = NULL;
+    struct timespec ts_cur;
 
     if (!orig_session) {
         ERRARG("orig_session");
@@ -1511,7 +1524,10 @@ nc_session_accept_ssh_channel(struct nc_session *orig_session, struct nc_session
         return msgtype;
     }
 
-    new_session->opts.server.session_start = new_session->opts.server.last_rpc = time(NULL);
+    nc_gettimespec_real(&ts_cur);
+    new_session->opts.server.session_start = ts_cur.tv_sec;
+    nc_gettimespec_mono(&ts_cur);
+    new_session->opts.server.last_rpc = ts_cur.tv_sec;
     new_session->status = NC_STATUS_RUNNING;
     *session = new_session;
 
@@ -1524,6 +1540,7 @@ nc_ps_accept_ssh_channel(struct nc_pollsession *ps, struct nc_session **session)
     uint8_t q_id;
     NC_MSG_TYPE msgtype;
     struct nc_session *new_session = NULL, *cur_session;
+    struct timespec ts_cur;
     uint16_t i;
 
     if (!ps) {
@@ -1540,7 +1557,7 @@ nc_ps_accept_ssh_channel(struct nc_pollsession *ps, struct nc_session **session)
     }
 
     for (i = 0; i < ps->session_count; ++i) {
-        cur_session = ps->sessions[i].session;
+        cur_session = ps->sessions[i]->session;
         if ((cur_session->status == NC_STATUS_RUNNING) && (cur_session->ti_type == NC_TI_LIBSSH)
                 && cur_session->ti.libssh.next) {
             /* an SSH session with more channels */
@@ -1580,7 +1597,10 @@ nc_ps_accept_ssh_channel(struct nc_pollsession *ps, struct nc_session **session)
         return msgtype;
     }
 
-    new_session->opts.server.session_start = new_session->opts.server.last_rpc = time(NULL);
+    nc_gettimespec_real(&ts_cur);
+    new_session->opts.server.session_start = ts_cur.tv_sec;
+    nc_gettimespec_mono(&ts_cur);
+    new_session->opts.server.last_rpc = ts_cur.tv_sec;
     new_session->status = NC_STATUS_RUNNING;
     *session = new_session;
 

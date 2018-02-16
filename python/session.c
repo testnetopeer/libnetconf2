@@ -18,17 +18,79 @@
 
 /* standard headers */
 #include <string.h>
+#include <libssh/libssh.h>
 #include <libyang/libyang.h>
+#include <libyang/swigpyrun.h>
 
 #include "../src/config.h"
 #include "netconf.h"
+#include "session.h"
+#include "rpc.h"
 
-typedef struct {
-    PyObject_HEAD
-    struct ly_ctx *ctx;
-    unsigned int *ctx_counter;
-    struct nc_session *session;
-} ncSessionObject;
+extern PyObject *libnetconf2Error;
+
+int
+auth_hostkey_check_pyclb(const char *hostname, ssh_session session, void *priv)
+{
+    PyObject *arglist, *result;
+    ncSSHObject *ssh = (ncSSHObject*)priv;
+    int ret = EXIT_FAILURE, rc, state;
+    unsigned char *hash_sha1 = NULL;
+    char *hexa;
+    const char *keytype = NULL;
+    ssh_key srv_pubkey;
+    size_t hlen;
+
+    state = ssh_is_server_known(session);
+    if (state == SSH_SERVER_KNOWN_OK) {
+        /* known host */
+        return EXIT_SUCCESS;
+    } else if (!ssh->clb_hostcheck) {
+        /* no callback, hostkey check failed */
+        return EXIT_FAILURE;
+    }
+
+    /* use the callback set by Python application */
+    rc = ssh_get_publickey(session, &srv_pubkey);
+    if (rc < 0) {
+        PyErr_SetString(PyExc_RuntimeError, "Unable to get server public key.");
+        return -1;
+    }
+
+    keytype = ssh_key_type_to_char(ssh_key_type(srv_pubkey));
+    rc = ssh_get_publickey_hash(srv_pubkey, SSH_PUBLICKEY_HASH_SHA1, &hash_sha1, &hlen);
+    ssh_key_free(srv_pubkey);
+    if (rc < 0) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to calculate SHA1 hash of the server public key.");
+        return -1;
+    }
+
+    hexa = ssh_get_hexa(hash_sha1, hlen);
+    arglist = Py_BuildValue("(sissO)", hostname, state, keytype, hexa, ssh->clb_hostcheck_data ? ssh->clb_hostcheck_data : Py_None);
+    if (!arglist) {
+        PyErr_Print();
+        ssh_string_free_char(hexa);
+        ssh_clean_pubkey_hash(&hash_sha1);
+        return -1;
+    }
+    result = PyObject_CallObject(ssh->clb_hostcheck, arglist);
+    Py_DECREF(arglist);
+    ssh_string_free_char(hexa);
+    ssh_clean_pubkey_hash(&hash_sha1);
+
+    if (result) {
+        if (!PyBool_Check(result)) {
+            PyErr_SetString(PyExc_TypeError, "Invalid hostkey check callback result.");
+        } else if (result == Py_True) {
+            ret = EXIT_SUCCESS;
+        } else if (result != Py_False) {
+            PyErr_SetString(PyExc_TypeError, "Invalid hostkey check callback result.");
+        }
+        Py_DECREF(result);
+    }
+
+    return ret;
+}
 
 char *
 auth_password_clb(const char *UNUSED(username), const char *UNUSED(hostname), void *priv)
@@ -138,15 +200,8 @@ ncSessionNew(PyTypeObject *type, PyObject *args, PyObject *kwds)
     if (self != NULL) {
         /* NULL initiation */
         self->session = NULL;
+        self->ctx = NULL;
         self->ctx_counter = calloc(1, sizeof *self->ctx_counter);
-
-        /* prepare libyang context or use the one already present in the session */
-        self->ctx = ly_ctx_new(SCHEMAS_DIR);
-        if (!self->ctx) {
-            Py_DECREF(self);
-            return NULL;
-        }
-        (*self->ctx_counter)++;
     }
 
     return (PyObject *)self;
@@ -158,7 +213,7 @@ ncSessionInit(ncSessionObject *self, PyObject *args, PyObject *kwds)
     const char *host = NULL;
     PyObject *transport = NULL;
     unsigned short port = 0;
-    struct nc_session *session;
+    struct nc_session *session = NULL;
 
     char *kwlist[] = {"host", "port", "transport", NULL};
 
@@ -168,14 +223,22 @@ ncSessionInit(ncSessionObject *self, PyObject *args, PyObject *kwds)
     }
 
     /* connect */
+#ifdef NC_ENABLED_TLS
     if (transport && PyObject_TypeCheck(transport, &ncTLSType)) {
-        session = nc_connect_tls(host, port, self->ctx);
+        session = nc_connect_tls(host, port, NULL);
     } else {
+#else /* !NC_ENABLED_TLS */
+    {
+#endif
+#ifdef NC_ENABLED_SSH
         if (transport) {
             /* set SSH parameters */
             if (((ncSSHObject*)transport)->username) {
                 nc_client_ssh_set_username(PyUnicode_AsUTF8(((ncSSHObject*)transport)->username));
             }
+
+            nc_client_ssh_set_auth_hostkey_check_clb(&auth_hostkey_check_pyclb, (void *)transport);
+
             if (((ncSSHObject*)transport)->password) {
                 nc_client_ssh_set_auth_password_clb(&auth_password_clb,
                                                     (void *)PyUnicode_AsUTF8(((ncSSHObject*)transport)->password));
@@ -194,8 +257,7 @@ ncSessionInit(ncSessionObject *self, PyObject *args, PyObject *kwds)
         }
 
         /* create connection */
-        session = nc_connect_ssh(host, port, self->ctx);
-
+        session = nc_connect_ssh(host, port, NULL);
         /* cleanup */
         if (transport) {
             if (((ncSSHObject*)transport)->username) {
@@ -207,6 +269,7 @@ ncSessionInit(ncSessionObject *self, PyObject *args, PyObject *kwds)
                 nc_client_ssh_set_auth_privkey_passphrase_clb(NULL, NULL);
             }
         }
+#endif /* NC_ENABLED_SSH */
     }
 
     /* check the result */
@@ -214,12 +277,17 @@ ncSessionInit(ncSessionObject *self, PyObject *args, PyObject *kwds)
         return -1;
     }
 
+    /* get the internally created context for this session */
+    self->ctx = nc_session_get_ctx(session);
+
     /* replace the previous (if any) data in the session object */
     nc_session_free(self->session, NULL);
     self->session = session;
 
     return 0;
 }
+
+#ifdef NC_ENABLED_SSH
 
 static PyObject *
 newChannel(PyObject *self)
@@ -247,6 +315,8 @@ newChannel(PyObject *self)
     (*new->ctx_counter)++;
     return (PyObject*)new;
 }
+
+#endif /* NC_ENABLED_SSH */
 
 static PyObject *
 ncSessionStr(ncSessionObject *self)
@@ -308,10 +378,14 @@ ncSessionGetTransport(ncSessionObject *self, void *closure)
 {
     NC_TRANSPORT_IMPL ti = nc_session_get_ti(self->session);
     switch (ti) {
+#ifdef NC_ENABLED_SSH
     case NC_TI_LIBSSH:
         return PyUnicode_FromString("SSH");
+#endif /* NC_ENABLED_SSH */
+#ifdef NC_ENABLEd_TLS
     case NC_TI_OPENSSL:
         return PyUnicode_FromString("TLS");
+#endif /* NC_ENABLED_TLS */
     default:
         return PyUnicode_FromString("unknown");
     }
@@ -347,6 +421,40 @@ ncSessionGetVersion(ncSessionObject *self, void *closure)
     }
 }
 
+static PyObject *
+ncSessionGetContext(ncSessionObject *self, void *closure)
+{
+    PyObject *context, *result, *module;
+
+
+    /* process the received data */
+    context = SWIG_NewPointerObj(self->ctx, SWIG_Python_TypeQuery("ly_ctx*"), 0);
+    if (!context) {
+        PyErr_SetString(libnetconf2Error, "Building Python object from context structure failed.");
+        goto error;
+    }
+
+    module = PyImport_ImportModule("yang");
+    if (module == NULL) {
+        PyErr_SetString(libnetconf2Error, "Could not import libyang python module");
+        goto error;
+    }
+
+    result = PyObject_CallMethod(module, "create_new_Context", "(O)", context, NULL);
+    Py_DECREF(module);
+    Py_DECREF(context);
+    if (!result) {
+        PyErr_SetString(libnetconf2Error, "Could not create Context object.");
+        goto error;
+    }
+
+    return result;
+
+error:
+    Py_XDECREF(context);
+    return NULL;
+}
+
 /*
  * Callback structures
  */
@@ -359,6 +467,7 @@ static PyGetSetDef ncSessionGetSetters[] = {
     {"transport", (getter)ncSessionGetTransport, NULL, "Transport protocol used for the NETCONF Session.", NULL},
     {"version", (getter)ncSessionGetVersion, NULL, "NETCONF Protocol version used for the NETCONF Session.", NULL},
     {"capabilities", (getter)ncSessionGetCapabilities, NULL, "Capabilities of the NETCONF Session.", NULL},
+    {"context", (getter)ncSessionGetContext, NULL, "libyang context of the NETCONF Session.", NULL},
     {NULL} /* Sentinel */
 };
 
@@ -367,10 +476,25 @@ static PyMemberDef ncSessionMembers[] = {
 };
 
 static PyMethodDef ncSessionMethods[] = {
+#ifdef NC_ENABLED_SSH
     {"newChannel", (PyCFunction)newChannel, METH_NOARGS,
      "newChannel()\n--\n\n"
      "Create another NETCONF session on existing SSH session using separated SSH channel\n\n"
      ":returns: New netconf2.Session instance.\n"},
+#endif /* NC_ENABLED_SSH */
+    /* RPCs */
+    {"rpcGet", (PyCFunction)ncRPCGet, METH_VARARGS | METH_KEYWORDS,
+     "Send NETCONF <get> operation on the Session.\n\n"
+     "ncRPCGet(subtree=None, xpath=None)\n"
+     ":returns: Reply from the server.\n"},
+    {"rpcGetConfig", (PyCFunction)ncRPCGetConfig, METH_VARARGS | METH_KEYWORDS,
+     "Send NETCONF <get-config> operation on the Session.\n\n"
+     "ncRPCGetConfig(datastore, subtree=None, xpath=None)\n"
+     ":returns: Reply from the server.\n"},
+    {"rpcEditConfig", (PyCFunction)ncRPCEditConfig, METH_VARARGS | METH_KEYWORDS,
+     "Send NETCONF <edit-config> operation on the Session.\n\n"
+     "ncRPCEditConfig(datastore, data, defop=None, testopt=None, erropt=None)\n"
+     ":returns: None\n"},
     {NULL}  /* Sentinel */
 };
 

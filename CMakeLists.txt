@@ -13,6 +13,9 @@ if(NOT UNIX)
     message(FATAL_ERROR "Only *nix like systems are supported.")
 endif()
 
+# osx specific
+set(CMAKE_MACOSX_RPATH TRUE)
+
 set(INCLUDE_INSTALL_SUBDIR ${CMAKE_INSTALL_INCLUDEDIR}/libnetconf2)
 set(DATA_INSTALL_DIR ${CMAKE_INSTALL_DATADIR}/libnetconf2)
 
@@ -23,12 +26,13 @@ endif()
 
 set(CMAKE_C_FLAGS         "${CMAKE_C_FLAGS} -Wall -Wextra -fvisibility=hidden")
 set(CMAKE_C_FLAGS_RELEASE "-O2 -DNDEBUG")
+set(CMAKE_C_FLAGS_PACKAGE "-g -O2 -DNDEBUG")
 set(CMAKE_C_FLAGS_DEBUG   "-g -O0")
 
 # set version
 set(LIBNETCONF2_MAJOR_VERSION 0)
-set(LIBNETCONF2_MINOR_VERSION 9)
-set(LIBNETCONF2_MICRO_VERSION 13)
+set(LIBNETCONF2_MINOR_VERSION 11)
+set(LIBNETCONF2_MICRO_VERSION 9)
 set(LIBNETCONF2_VERSION ${LIBNETCONF2_MAJOR_VERSION}.${LIBNETCONF2_MINOR_VERSION}.${LIBNETCONF2_MICRO_VERSION})
 set(LIBNETCONF2_SOVERSION ${LIBNETCONF2_MAJOR_VERSION}.${LIBNETCONF2_MINOR_VERSION})
 
@@ -40,11 +44,78 @@ option(ENABLE_PYTHON "Include bindings for Python 3" OFF)
 set(READ_INACTIVE_TIMEOUT 20 CACHE STRING "Maximum number of seconds waiting for new data once some data have arrived")
 set(READ_ACTIVE_TIMEOUT 300 CACHE STRING "Maximum number of seconds for receiving a full message")
 set(MAX_PSPOLL_THREAD_COUNT 6 CACHE STRING "Maximum number of threads that could simultaneously access a ps_poll structure")
+set(SCHEMAS_DIR "${CMAKE_INSTALL_PREFIX}/${DATA_INSTALL_DIR}" CACHE STRING "Directory with internal lnc2 schemas")
 
 if(ENABLE_DNSSEC AND NOT ENABLE_SSH)
     message(WARNING "DNSSEC SSHFP retrieval cannot be used without SSH support.")
     set(ENABLE_DNSSEC OFF)
 endif()
+
+# package options
+find_program (DEB_BUILDER NAMES debuild)
+find_program (RPM_BUILDER NAMES rpmbuild)
+
+if (NOT DEFINED ENV{TRAVIS_BRANCH})
+    execute_process(COMMAND "git" "rev-parse" "--abbrev-ref" "HEAD"
+                    OUTPUT_VARIABLE GIT_BRANCH
+                    OUTPUT_STRIP_TRAILING_WHITESPACE
+                    ERROR_QUIET
+                   )
+    if (NOT GIT_BRANCH)
+        set(ENV{TRAVIS_BRANCH} "master")
+    else()
+        if (GIT_BRANCH MATCHES "master|devel")
+            set(ENV{TRAVIS_BRANCH} ${GIT_BRANCH})
+        else()
+            set(ENV{TRAVIS_BRANCH} "master")
+        endif()
+    endif()
+    set(GIT_BRANCH $ENV{TRAVIS_BRANCH})
+endif()
+
+if ($ENV{TRAVIS_BRANCH} STREQUAL "master")
+    set(PACKAGE_NAME "libnetconf2")
+    set(BRANCH "master")
+    set(BUILD_TYPE "Package")
+    set(CONFLICT_PACKAGE_NAME "libnetconf2-experimental")
+    set(COMPAT_PACKAGES "")
+else ()
+    set(PACKAGE_NAME "libnetconf2-experimental")
+    set(BRANCH "devel")
+    set(BUILD_TYPE "debug")
+    set(CONFLICT_PACKAGE_NAME "libnetconf2")
+    set(COMPAT_PACKAGES "-experimental")
+endif()
+# change version in config files
+configure_file(${PROJECT_SOURCE_DIR}/packages/libnetconf2.spec.in ${PROJECT_BINARY_DIR}/build-packages/libnetconf2.spec)
+configure_file(${PROJECT_SOURCE_DIR}/packages/libnetconf2.dsc.in ${PROJECT_BINARY_DIR}/build-packages/libnetconf2.dsc)
+configure_file(${PROJECT_SOURCE_DIR}/packages/debian.control.in ${PROJECT_BINARY_DIR}/build-packages/debian.control @ONLY)
+configure_file(${PROJECT_SOURCE_DIR}/packages/debian.rules.in ${PROJECT_BINARY_DIR}/build-packages/debian.rules)
+
+if (NOT DEB_BUILDER)
+    message(WARNING "Missing tools (devscripts, debhelper package) for building deb package.\nYou won't be able to generate deb package from source code.\nCompiling libnetconf2 should still works fine.")
+else ()
+    # target for local build deb package
+    add_custom_target(build-deb
+                      WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+                      COMMAND build-packages/local-deb.sh
+    )
+    configure_file(${PROJECT_SOURCE_DIR}/packages/local-deb.sh.in ${PROJECT_BINARY_DIR}/build-packages/local-deb.sh @ONLY)
+endif()
+
+if (NOT RPM_BUILDER)
+    message(WARNING "Missing tools (rpm package) for building rpm package. \nYou won't be able to generate rpm package from source code.\nCompiling libnetconf2 should still works fine.")
+else ()
+    # target for local build rpm package
+    string(REPLACE ${PROJECT_SOURCE_DIR} "." EXCLUDE_BUILD_DIR ${PROJECT_BINARY_DIR})
+    add_custom_target(build-rpm
+                      WORKING_DIRECTORY ${PROJECT_BINARY_DIR}
+                      COMMAND build-packages/local-rpm.sh
+    )
+    configure_file(${PROJECT_SOURCE_DIR}/packages/local-rpm.sh.in ${PROJECT_BINARY_DIR}/build-packages/local-rpm.sh @ONLY)
+endif()
+
+include_directories(${PROJECT_BINARY_DIR}/src)
 
 # source files
 set(libsrc
@@ -86,7 +157,7 @@ set(headers
 add_library(netconf2 SHARED ${libsrc})
 set_target_properties(netconf2 PROPERTIES VERSION ${LIBNETCONF2_VERSION} SOVERSION ${LIBNETCONF2_SOVERSION})
 
-if(CMAKE_BUILD_TYPE STREQUAL debug)
+if((CMAKE_BUILD_TYPE STREQUAL debug) OR (CMAKE_BUILD_TYPE STREQUAL Package))
     option(ENABLE_BUILD_TESTS "Build tests" ON)
     option(ENABLE_VALGRIND_TESTS "Build tests with valgrind" ON)
 else()
@@ -104,14 +175,6 @@ set(CMAKE_REQUIRED_LIBRARIES pthread)
 check_function_exists(pthread_spin_lock HAVE_SPINLOCK)
 check_function_exists(pthread_mutex_timedlock HAVE_PTHREAD_MUTEX_TIMEDLOCK)
 
-# dependencies - libssh
-if(ENABLE_SSH)
-    find_package(LibSSH 0.6.4 REQUIRED)
-    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNC_ENABLED_SSH ${LIBSSH_DEFINITIONS}")
-    target_link_libraries(netconf2 ${LIBSSH_LIBRARIES} -L${SSH_LIBRARY} -lssh_threads -lcrypt)
-    include_directories(${LIBSSH_INCLUDE_DIRS})
-endif()
-
 # dependencies - openssl
 if(ENABLE_TLS OR ENABLE_DNSSEC OR ENABLE_SSH)
     find_package(OpenSSL REQUIRED)
@@ -120,6 +183,14 @@ if(ENABLE_TLS OR ENABLE_DNSSEC OR ENABLE_SSH)
     endif()
     target_link_libraries(netconf2 ${OPENSSL_LIBRARIES})
     include_directories(${OPENSSL_INCLUDE_DIR})
+endif()
+
+# dependencies - libssh
+if(ENABLE_SSH)
+    find_package(LibSSH 0.7.0 REQUIRED)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DNC_ENABLED_SSH")
+    target_link_libraries(netconf2 "-L${LIBSSH_LIBRARY_DIR}" -lssh -lssh_threads -lcrypt)
+    include_directories(${LIBSSH_INCLUDE_DIRS})
 endif()
 
 # dependencies - libval
@@ -192,7 +263,7 @@ if(ENABLE_BUILD_TESTS)
     endif(CMOCKA_FOUND)
 endif()
 
-configure_file("${PROJECT_SOURCE_DIR}/src/config.h.in" "${PROJECT_SOURCE_DIR}/src/config.h" ESCAPE_QUOTES @ONLY)
+configure_file("${PROJECT_SOURCE_DIR}/src/config.h.in" "${PROJECT_BINARY_DIR}/src/config.h" ESCAPE_QUOTES @ONLY)
 configure_file(nc_client.h.in nc_client.h)
 configure_file(nc_server.h.in nc_server.h)
 

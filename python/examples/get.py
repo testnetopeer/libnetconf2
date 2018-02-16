@@ -3,6 +3,7 @@
 import sys
 import os
 import getpass
+import yang
 import netconf2 as nc
 
 def interactive_auth(name, instruct, prompt, data):
@@ -45,10 +46,14 @@ except Exception as e:
 	print(e)
 	sys.exit(1)
 
-#
-# print the list of the NETCONF server capabilities
-#
-print("\nNETCONF server capabilities from " + (host if host else "localhost") + ":" + (str(port) if port else "830") + " (session ID " + str(session.id) + "):")
-for c in session.capabilities:
-	print(c)
+# perform <get> and print result
+try:
+        data = session.rpcGet()
+except nc.ReplyError as e:
+        reply = {'success':False, 'error': []}
+        for err in e.args[0]:
+                reply['error'].append(json.loads(str(err)))
+        print(json.dumps(reply))
+        sys.exit(1)
 
+print(data.print_mem(yang.LYD_XML, yang.LYP_FORMAT | yang.LYP_WITHSIBLINGS))

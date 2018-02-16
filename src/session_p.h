@@ -284,7 +284,13 @@ struct nc_server_opts {
 /**
  * Timeout in msec for acquiring a lock of a pollsession structure.
  */
-#define NC_PS_LOCK_TIMEOUT 500
+#define NC_PS_LOCK_TIMEOUT 200
+
+/**
+ * Timeout in msec for a thread to wait for its turn to work with a pollsession structure.
+ *
+ */
+#define NC_PS_QUEUE_TIMEOUT 1000
 
 /**
  * Time slept in msec if no endpoint was created for a running Call Home client.
@@ -392,8 +398,8 @@ struct nc_session {
         } client;
         struct {
             /* server side only data */
-            time_t session_start;          /**< time the session was created */
-            time_t last_rpc;               /**< time the last RPC was received on this session */
+            time_t session_start;          /**< real time the session was created */
+            time_t last_rpc;               /**< monotonic time (seconds) the last RPC was received on this session */
             int ntf_status;                /**< flag whether the session is subscribed to any stream */
             pthread_mutex_t *ch_lock;      /**< Call Home thread lock */
             pthread_cond_t *ch_cond;       /**< Call Home thread condition */
@@ -424,12 +430,14 @@ enum nc_ps_session_state {
     NC_PS_STATE_INVALID        /**< session is invalid and was already returned by another poll */
 };
 
+struct nc_ps_session {
+    struct nc_session *session;
+    enum nc_ps_session_state state;
+};
+
 /* ACCESS locked */
 struct nc_pollsession {
-    struct {
-        struct nc_session *session;
-        enum nc_ps_session_state state;
-    } *sessions;
+    struct nc_ps_session **sessions;
     uint16_t session_count;
     uint16_t last_event_session;
 
@@ -437,7 +445,7 @@ struct nc_pollsession {
     pthread_mutex_t lock;
     uint8_t queue[NC_PS_QUEUE_SIZE]; /**< round buffer, queue is empty when queue_len == 0 */
     uint8_t queue_begin;             /**< queue starts on queue[queue_begin] */
-    uint8_t queue_len;               /**< queue ends on queue[queue_begin + queue_len - 1] */
+    uint8_t queue_len;               /**< queue ends on queue[(queue_begin + queue_len - 1) % NC_PS_QUEUE_SIZE] */
 };
 
 struct nc_ntf_thread_arg {
@@ -453,7 +461,9 @@ NC_MSG_TYPE nc_send_msg(struct nc_session *session, struct lyd_node *op);
 int pthread_mutex_timedlock(pthread_mutex_t *mutex, const struct timespec *abstime);
 #endif
 
-int nc_gettimespec(struct timespec *ts);
+int nc_gettimespec_mono(struct timespec *ts);
+
+int nc_gettimespec_real(struct timespec *ts);
 
 int32_t nc_difftimespec(const struct timespec *ts1, const struct timespec *ts2);
 

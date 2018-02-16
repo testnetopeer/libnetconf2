@@ -12,8 +12,7 @@
  *     https://opensource.org/licenses/BSD-3-Clause
  */
 
-#define _GNU_SOURCE /* asprintf */
-#define _POSIX_SOUCE /* signals */
+#define _GNU_SOURCE /* asprintf, signals */
 #include <assert.h>
 #include <errno.h>
 #include <poll.h>
@@ -53,7 +52,7 @@ nc_read(struct nc_session *session, char *buf, size_t count, uint32_t inact_time
         return 0;
     }
 
-    nc_gettimespec(&ts_inact_timeout);
+    nc_gettimespec_mono(&ts_inact_timeout);
     nc_addtimespec(&ts_inact_timeout, inact_timeout);
     do {
         switch (session->ti_type) {
@@ -137,7 +136,7 @@ nc_read(struct nc_session *session, char *buf, size_t count, uint32_t inact_time
         if (r == 0) {
             /* nothing read */
             usleep(NC_TIMEOUT_STEP);
-            nc_gettimespec(&ts_cur);
+            nc_gettimespec_mono(&ts_cur);
             if ((nc_difftimespec(&ts_cur, &ts_inact_timeout) < 1) || (nc_difftimespec(&ts_cur, ts_act_timeout) < 1)) {
                 if (nc_difftimespec(&ts_cur, &ts_inact_timeout) < 1) {
                     ERR("Session %u: inactive read timeout elapsed.", session->id);
@@ -153,7 +152,7 @@ nc_read(struct nc_session *session, char *buf, size_t count, uint32_t inact_time
             readd += r;
 
             /* reset inactive timeout */
-            nc_gettimespec(&ts_inact_timeout);
+            nc_gettimespec_mono(&ts_inact_timeout);
             nc_addtimespec(&ts_inact_timeout, inact_timeout);
         }
 
@@ -283,7 +282,7 @@ nc_read_msg(struct nc_session *session, struct lyxml_elem **data)
         return NC_MSG_ERROR;
     }
 
-    nc_gettimespec(&ts_act_timeout);
+    nc_gettimespec_mono(&ts_act_timeout);
     nc_addtimespec(&ts_act_timeout, NC_READ_ACT_TIMEOUT * 1000);
 
     /* read the message */
@@ -457,8 +456,8 @@ nc_read_poll(struct nc_session *session, int timeout)
         }
 
         fds.fd = SSL_get_fd(session->ti.tls);
-        /* fallthrough */
 #endif
+        /* fallthrough */
     case NC_TI_FD:
         if (session->ti_type == NC_TI_FD) {
             fds.fd = session->ti.fd.in;
@@ -551,7 +550,7 @@ nc_session_is_connected(struct nc_session *session)
         fds.fd = SSL_get_fd(session->ti.tls);
         break;
 #endif
-    case NC_TI_NONE:
+    default:
         ERRINT;
         return 0;
     }
@@ -1048,7 +1047,10 @@ nc_write_msg(struct nc_session *session, int type, ...)
         nc_write_clb((void *)&arg, buf, count, 0);
         free(buf);
 
-        lyd_print_clb(nc_write_xmlclb, (void *)&arg, content, LYD_XML, LYP_WITHSIBLINGS | LYP_NETCONF);
+        if (lyd_print_clb(nc_write_xmlclb, (void *)&arg, content, LYD_XML, LYP_WITHSIBLINGS | LYP_NETCONF)) {
+            va_end(ap);
+            return -1;
+        }
         nc_write_clb((void *)&arg, "</rpc>", 6, 0);
 
         session->opts.client.msgid++;
@@ -1075,7 +1077,7 @@ nc_write_msg(struct nc_session *session, int type, ...)
             nc_write_clb((void *)&arg, ">", 1, 0);
         } else {
             /* but put there at least the correct namespace */
-            nc_write_clb((void *)&arg, "xmlns=\""NC_NS_BASE"\">", 48, 0);
+            nc_write_clb((void *)&arg, " xmlns=\""NC_NS_BASE"\">", 49, 0);
         }
         switch (reply->type) {
         case NC_RPL_OK:
@@ -1102,8 +1104,11 @@ nc_write_msg(struct nc_session *session, int type, ...)
                 wd = LYP_WD_ALL_TAG;
                 break;
             }
-            lyd_print_clb(nc_write_xmlclb, (void *)&arg, ((struct nc_reply_data *)reply)->data, LYD_XML,
-                          LYP_WITHSIBLINGS | LYP_NETCONF | wd);
+            if (lyd_print_clb(nc_write_xmlclb, (void *)&arg, ((struct nc_reply_data *)reply)->data, LYD_XML,
+                              LYP_WITHSIBLINGS | LYP_NETCONF | wd)) {
+                va_end(ap);
+                return -1;
+            }
             break;
         case NC_RPL_ERROR:
             error_rpl = (struct nc_server_reply_error *)reply;
@@ -1134,7 +1139,10 @@ nc_write_msg(struct nc_session *session, int type, ...)
         nc_write_clb((void *)&arg, "<eventTime>", 11, 0);
         nc_write_clb((void *)&arg, notif->eventtime, strlen(notif->eventtime), 0);
         nc_write_clb((void *)&arg, "</eventTime>", 12, 0);
-        lyd_print_clb(nc_write_xmlclb, (void *)&arg, notif->tree, LYD_XML, 0);
+        if (lyd_print_clb(nc_write_xmlclb, (void *)&arg, notif->tree, LYD_XML, 0)) {
+            va_end(ap);
+            return -1;
+        }
         nc_write_clb((void *)&arg, "</notification>", 15, 0);
         break;
 
