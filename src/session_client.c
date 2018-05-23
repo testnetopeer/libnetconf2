@@ -193,7 +193,7 @@ nc_session_new_ctx(struct nc_session *session, struct ly_ctx *ctx)
 {
     /* assign context (dicionary needed for handshake) */
     if (!ctx) {
-        ctx = ly_ctx_new(NULL, 0);
+        ctx = ly_ctx_new(NULL, LY_CTX_NOYANGLIBRARY);
         if (!ctx) {
             return EXIT_FAILURE;
         }
@@ -322,7 +322,6 @@ getschema_module_clb(const char *mod_name, const char *mod_rev, const char *subm
     char *model_data = NULL;
     uint64_t msgid;
     char *filename = NULL;
-    const char * const *searchdirs;
     FILE *output;
 
     if (submod_name) {
@@ -407,9 +406,8 @@ getschema_module_clb(const char *mod_name, const char *mod_rev, const char *subm
     *format = LYS_IN_YANG;
 
     /* try to store the model_data into local schema repository */
-    if (model_data) {
-        searchdirs = ly_ctx_get_searchdirs(session->ctx);
-        if (asprintf(&filename, "%s/%s%s%s.yang", searchdirs ? searchdirs[0] : ".", mod_name,
+    if (model_data && client_opts.schema_searchpath) {
+        if (asprintf(&filename, "%s/%s%s%s.yang", client_opts.schema_searchpath, mod_name,
                      mod_rev ? "@" : "", mod_rev ? mod_rev : "") == -1) {
             ERRMEM;
         } else {
@@ -430,7 +428,7 @@ getschema_module_clb(const char *mod_name, const char *mod_rev, const char *subm
 
 static int
 nc_ctx_load_module(struct nc_session *session, const char *name, const char *revision, int implement,
-                   ly_module_imp_clb user_clb, void *user_data, const struct lys_module **mod)
+                   ly_module_imp_clb user_clb, void *user_data, int has_get_schema, const struct lys_module **mod)
 {
     int ret = 0;
     struct ly_err_item *eitem;
@@ -461,15 +459,24 @@ nc_ctx_load_module(struct nc_session *session, const char *name, const char *rev
         }
 
         /* 3) using get-schema callback */
-        if (!(*mod)) {
+        if (has_get_schema && !(*mod)) {
             ly_ctx_set_module_imp_clb(session->ctx, &getschema_module_clb, session);
             *mod = ly_ctx_load_module(session->ctx, name, revision);
+            if (*mod) {
+                /* print get-schema warning */
+                eitem = ly_err_first(session->ctx);
+                if (eitem && (eitem->prev->level == LY_LLWRN)) {
+                    ly_log_options(LY_LOLOG);
+                    ly_err_print(eitem->prev);
+                }
+            }
         }
 
         /* unset callback back to use searchpath */
         ly_ctx_set_module_imp_clb(session->ctx, NULL, NULL);
 
-        /* print errors on definite failure */
+        /* restore logging options, then print errors on definite failure */
+        ly_log_options(LY_LOLOG | LY_LOSTORE_LAST);
         if (!(*mod)) {
             for (eitem = ly_err_first(session->ctx); eitem && eitem->next; eitem = eitem->next) {
                 ly_err_print(eitem);
@@ -477,9 +484,8 @@ nc_ctx_load_module(struct nc_session *session, const char *name, const char *rev
             ret = -1;
         }
 
-        /* clean the errors and restore logging */
+        /* clean the errors */
         ly_err_clean(session->ctx, NULL);
-        ly_log_options(LY_LOLOG | LY_LOSTORE_LAST);
     }
 
     return ret;
@@ -487,7 +493,7 @@ nc_ctx_load_module(struct nc_session *session, const char *name, const char *rev
 
 /* NC_SCHEMAS_DIR not used (implicitly) */
 static int
-nc_ctx_fill_cpblts(struct nc_session *session, ly_module_imp_clb user_clb, void *user_data)
+nc_ctx_fill_cpblts(struct nc_session *session, ly_module_imp_clb user_clb, void *user_data, int has_get_schema)
 {
     int ret = 1;
     const struct lys_module *mod;
@@ -524,10 +530,8 @@ nc_ctx_fill_cpblts(struct nc_session *session, ly_module_imp_clb user_clb, void 
             revision = strndup(ptr, ptr2 - ptr);
         }
 
-        if (nc_ctx_load_module(session, name, revision, 1, user_clb, user_data, &mod)) {
-            ret = 1;
-            goto cleanup;
-        }
+        /* we can continue even if it fails */
+        nc_ctx_load_module(session, name, revision, 1, user_clb, user_data, has_get_schema, &mod);
 
         if (!mod) {
             if (session->status != NC_STATUS_RUNNING) {
@@ -588,7 +592,7 @@ cleanup:
 }
 
 static int
-nc_ctx_fill_yl(struct nc_session *session, ly_module_imp_clb user_clb, void *user_data)
+nc_ctx_fill_yl(struct nc_session *session, ly_module_imp_clb user_clb, void *user_data, int has_get_schema)
 {
     int ret = 1;
     struct nc_rpc *rpc = NULL;
@@ -685,17 +689,14 @@ parse:
             } else if (!strcmp(iter->schema->name, "conformance-type")) {
                 implemented = !strcmp(((struct lyd_node_leaf_list *)iter)->value_str, "implement");
             } else if (!strcmp(iter->schema->name, "feature")) {
-                ly_set_add(features, (void*)((struct lyd_node_leaf_list *)iter)->value_str, LY_SET_OPT_USEASLIST);
+                ly_set_add(features, (void *)((struct lyd_node_leaf_list *)iter)->value_str, LY_SET_OPT_USEASLIST);
             }
         }
 
-        if (nc_ctx_load_module(session, name, revision, implemented, user_clb, user_data, &mod)) {
-            ret = -1;
-            goto cleanup;
-        }
+        /* continue even on fail */
+        nc_ctx_load_module(session, name, revision, implemented, user_clb, user_data, has_get_schema, &mod);
 
-        if (!mod) { /* !mod && !implemented - will be loaded automatically, but remember to set features in the end */
-            assert(!implemented);
+        if (!mod && !implemented) { /* will be loaded automatically, but remember to set features in the end */
             if (imports_flag) {
                 ERR("Module \"%s@%s\" is supposed to be imported, but no other module imports it.",
                     name, revision ? revision : "<latest>");
@@ -755,6 +756,8 @@ nc_ctx_check_and_fill(struct nc_session *session)
     int i, get_schema_support = 0, yanglib_support = 0, ret = -1, r;
     ly_module_imp_clb old_clb = NULL;
     void *old_data = NULL;
+    const struct lys_module *mod = NULL;
+    char *revision;
 
     assert(session->opts.client.cpblts && session->ctx);
 
@@ -766,18 +769,17 @@ nc_ctx_check_and_fill(struct nc_session *session)
     /* check if get-schema is supported */
     for (i = 0; session->opts.client.cpblts[i]; ++i) {
         if (!strncmp(session->opts.client.cpblts[i], "urn:ietf:params:xml:ns:yang:ietf-netconf-monitoring?", 52)) {
-            get_schema_support = 1;
+            get_schema_support = 1 + i;
             if (yanglib_support) {
                 break;
             }
         } else if (!strncmp(session->opts.client.cpblts[i], "urn:ietf:params:xml:ns:yang:ietf-yang-library?", 46)) {
-            yanglib_support = 1;
+            yanglib_support = 1 + i;
             if (get_schema_support) {
                 break;
             }
         }
     }
-
     /* get-schema is supported, load local ietf-netconf-monitoring so we can create <get-schema> RPCs */
     if (get_schema_support && !ly_ctx_get_module(session->ctx, "ietf-netconf-monitoring", NULL, 1)) {
         if (!lys_parse_path(session->ctx, NC_SCHEMAS_DIR"/ietf-netconf-monitoring.yin", LYS_IN_YIN)) {
@@ -785,8 +787,6 @@ nc_ctx_check_and_fill(struct nc_session *session)
             get_schema_support = 0;
         }
     }
-    /* yang-library present does not need to be checked, it is one of the libyang's internal modules,
-     * so it is always present */
 
     /* load base model disregarding whether it's in capabilities (but NETCONF capabilities are used to enable features) */
     if (ctx_check_and_load_ietf_netconf(session->ctx, session->opts.client.cpblts)) {
@@ -794,8 +794,25 @@ nc_ctx_check_and_fill(struct nc_session *session)
     }
 
     if (yanglib_support && get_schema_support) {
+        /* use get schema to get server's ietf-yang-library */
+        revision = strstr(session->opts.client.cpblts[yanglib_support - 1], "revision=");
+        if (!revision) {
+            WRN("Loading NETCONF ietf-yang-library schema failed, missing revision in NETCONF <hello> message.");
+            WRN("Unable to automatically use <get-schema>.");
+            yanglib_support = 0;
+        } else {
+            revision = strndup(&revision[9], 10);
+            if (nc_ctx_load_module(session, "ietf-yang-library", revision, 1, old_clb, old_data, 1, &mod)) {
+                WRN("Loading NETCONF ietf-yang-library schema failed, unable to automatically use <get-schema>.");
+                yanglib_support = 0;
+            }
+            free(revision);
+        }
+    }
+
+    if (yanglib_support) {
         /* load schemas according to the ietf-yang-library data, which are more precise than capabilities list */
-        r = nc_ctx_fill_yl(session, old_clb, old_data);
+        r = nc_ctx_fill_yl(session, old_clb, old_data, get_schema_support);
         if (r == -1) {
             goto cleanup;
         } else if (r == 1) {
@@ -806,7 +823,7 @@ nc_ctx_check_and_fill(struct nc_session *session)
     } else {
 capabilities:
 
-        if (nc_ctx_fill_cpblts(session, old_clb, old_data)) {
+        if (nc_ctx_fill_cpblts(session, old_clb, old_data, get_schema_support)) {
             goto cleanup;
         }
     }
@@ -923,6 +940,15 @@ nc_sock_connect(const char* host, uint16_t port)
         /* make the socket non-blocking */
         if (((flags = fcntl(sock, F_GETFL)) == -1) || (fcntl(sock, F_SETFL, flags | O_NONBLOCK) == -1)) {
             ERR("Fcntl failed (%s).", strerror(errno));
+            close(sock);
+            freeaddrinfo(res_list);
+            return -1;
+        }
+
+        /* enable keep-alive */
+        i = 1;
+        if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &i, sizeof i) == -1) {
+            ERR("Setsockopt failed (%s).", strerror(errno));
             close(sock);
             freeaddrinfo(res_list);
             return -1;

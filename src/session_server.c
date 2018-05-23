@@ -184,7 +184,7 @@ nc_sock_listen(const char *address, uint16_t port)
         goto fail;
     }
 
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void *)&optVal, optLen)) {
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void *)&optVal, optLen) == -1) {
         ERR("Could not set socket SO_REUSEADDR socket option (%s).", strerror(errno));
         goto fail;
     }
@@ -326,6 +326,14 @@ nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout, ch
     /* make the socket non-blocking */
     if (((flags = fcntl(ret, F_GETFL)) == -1) || (fcntl(ret, F_SETFL, flags | O_NONBLOCK) == -1)) {
         ERR("Fcntl failed (%s).", strerror(errno));
+        close(ret);
+        return -1;
+    }
+
+    /* enable keep-alive */
+    flags = 1;
+    if (setsockopt(ret, SOL_SOCKET, SO_KEEPALIVE, &flags, sizeof flags) == -1) {
+        ERR("Setsockopt failed (%s).", strerror(errno));
         close(ret);
         return -1;
     }
@@ -502,6 +510,10 @@ nc_server_destroy(void)
     nc_server_del_endpt(NULL, 0);
 #endif
 #ifdef NC_ENABLED_SSH
+    if (server_opts.passwd_auth_data && server_opts.passwd_auth_data_free) {
+        server_opts.passwd_auth_data_free(server_opts.passwd_auth_data);
+    }
+
     nc_server_ssh_del_authkey(NULL, NULL, 0, NULL);
 
     if (server_opts.hostkey_data && server_opts.hostkey_data_free) {
@@ -2765,14 +2777,14 @@ nc_server_ch_client_with_endpt_lock(const char *name)
 static int
 nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct nc_ch_client_thread_arg *data)
 {
-    int ret;
+    int ret = 0, r;
     uint32_t idle_timeout;
     struct timespec ts;
     struct nc_ch_client *client;
 
     /* session created, initialize condition */
-    session->opts.server.ch_lock = malloc(sizeof *session->opts.server.ch_lock);
-    session->opts.server.ch_cond = malloc(sizeof *session->opts.server.ch_cond);
+    session->opts.server.ch_lock = calloc(1, sizeof *session->opts.server.ch_lock);
+    session->opts.server.ch_cond = calloc(1, sizeof *session->opts.server.ch_cond);
     if (!session->opts.server.ch_lock || !session->opts.server.ch_cond) {
         ERRMEM;
         nc_session_free(session, NULL);
@@ -2793,10 +2805,16 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
         nc_gettimespec_real(&ts);
         nc_addtimespec(&ts, NC_CH_NO_ENDPT_WAIT);
 
-        ret = pthread_cond_timedwait(session->opts.server.ch_cond, session->opts.server.ch_lock, &ts);
-        if (ret && (ret != ETIMEDOUT)) {
-            ERR("Pthread condition timedwait failed (%s).", strerror(ret));
-            goto ch_client_remove;
+        r = pthread_cond_timedwait(session->opts.server.ch_cond, session->opts.server.ch_lock, &ts);
+        if (!r) {
+            /* we were woken up, something probably happened */
+            if (session->status != NC_STATUS_RUNNING) {
+                break;
+            }
+        } else if (r != ETIMEDOUT) {
+            ERR("Pthread condition timedwait failed (%s).", strerror(r));
+            ret = -1;
+            break;
         }
 
         /* check whether the client was not removed */
@@ -2806,7 +2824,8 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
             /* client was removed, finish thread */
             VRB("Call Home client \"%s\" removed, but an established session will not be terminated.",
                 data->client_name);
-            goto ch_client_remove;
+            ret = 1;
+            break;
         }
 
         if (client->conn_type == NC_CH_PERSIST) {
@@ -2831,24 +2850,12 @@ nc_server_ch_client_thread_session_cond_wait(struct nc_session *session, struct 
     /* CH UNLOCK */
     pthread_mutex_unlock(session->opts.server.ch_lock);
 
-    return 0;
+    if (session->status == NC_STATUS_CLOSING) {
+        /* signal to nc_session_free() that we registered session being freed, otherwise it matters not */
+        session->flags &= ~NC_SESSION_CALLHOME;
+    }
 
-ch_client_remove:
-    /* make the session a standard one */
-    pthread_cond_destroy(session->opts.server.ch_cond);
-    free(session->opts.server.ch_cond);
-    session->opts.server.ch_cond = NULL;
-
-    session->flags &= ~NC_SESSION_CALLHOME;
-
-    /* CH UNLOCK */
-    pthread_mutex_unlock(session->opts.server.ch_lock);
-
-    pthread_mutex_destroy(session->opts.server.ch_lock);
-    free(session->opts.server.ch_lock);
-    session->opts.server.ch_lock = NULL;
-
-    return 1;
+    return ret;
 }
 
 static void *
@@ -2928,19 +2935,30 @@ nc_ch_client_thread(void *arg)
             }
 
             ++cur_attempts;
-            if (cur_attempts == client->max_attempts) {
-                for (i = 0; i < client->ch_endpt_count; ++i) {
-                    if (!strcmp(client->ch_endpts[i].name, cur_endpt_name)) {
-                        break;
-                    }
+
+            /* try to find our endpoint again */
+            for (i = 0; i < client->ch_endpt_count; ++i) {
+                if (!strcmp(client->ch_endpts[i].name, cur_endpt_name)) {
+                    break;
                 }
+            }
+
+            if (i < client->ch_endpt_count) {
+                /* endpoint was removed, start with the first one */
+                cur_endpt = &client->ch_endpts[0];
+                free(cur_endpt_name);
+                cur_endpt_name = strdup(cur_endpt->name);
+
+                cur_attempts = 0;
+            } else if (cur_attempts == client->max_attempts) {
+                /* we have tried to connect to this endpoint enough times */
                 if (i < client->ch_endpt_count - 1) {
                     /* just go to the next endpoint */
                     cur_endpt = &client->ch_endpts[i + 1];
                     free(cur_endpt_name);
                     cur_endpt_name = strdup(cur_endpt->name);
                 } else {
-                    /* cur_endpoint was removed or is the last, either way start with the first one */
+                    /* cur_endpoint is the last, start with the first one */
                     cur_endpt = &client->ch_endpts[0];
                     free(cur_endpt_name);
                     cur_endpt_name = strdup(cur_endpt->name);
@@ -2961,7 +2979,8 @@ cleanup:
 
 API int
 nc_connect_ch_client_dispatch(const char *client_name,
-                              void (*session_clb)(const char *client_name, struct nc_session *new_session)) {
+                              void (*session_clb)(const char *client_name, struct nc_session *new_session))
+{
     int ret;
     pthread_t tid;
     struct nc_ch_client_thread_arg *arg;
