@@ -21,6 +21,7 @@
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
+#include <netinet/tcp.h>
 #include <arpa/inet.h>
 #include <unistd.h>
 #include <fcntl.h>
@@ -163,8 +164,7 @@ nc_session_set_status(struct nc_session *session, NC_STATUS status)
 int
 nc_sock_listen(const char *address, uint16_t port)
 {
-    const int optVal = 1;
-    const socklen_t optLen = sizeof(optVal);
+    int opt;
     int is_ipv4, sock;
     struct sockaddr_storage saddr;
 
@@ -184,8 +184,14 @@ nc_sock_listen(const char *address, uint16_t port)
         goto fail;
     }
 
-    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, (void *)&optVal, optLen) == -1) {
-        ERR("Could not set socket SO_REUSEADDR socket option (%s).", strerror(errno));
+    opt = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &opt, sizeof opt) == -1) {
+        ERR("Could not set SO_REUSEADDR socket option (%s).", strerror(errno));
+        goto fail;
+    }
+    opt = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_KEEPALIVE, &opt, sizeof opt) == -1) {
+        ERR("Could not set SO_KEEPALIVE option (%s).", strerror(errno));
         goto fail;
     }
 
@@ -331,12 +337,30 @@ nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout, ch
     }
 
     /* enable keep-alive */
+#ifdef TCP_KEEPIDLE
     flags = 1;
-    if (setsockopt(ret, SOL_SOCKET, SO_KEEPALIVE, &flags, sizeof flags) == -1) {
+    if (setsockopt(ret, IPPROTO_TCP, TCP_KEEPIDLE, &flags, sizeof flags) == -1) {
         ERR("Setsockopt failed (%s).", strerror(errno));
         close(ret);
         return -1;
     }
+#endif
+#ifdef TCP_KEEPINTVL
+    flags = 5;
+    if (setsockopt(ret, IPPROTO_TCP, TCP_KEEPINTVL, &flags, sizeof flags) == -1) {
+        ERR("Setsockopt failed (%s).", strerror(errno));
+        close(ret);
+        return -1;
+    }
+#endif
+#ifdef TCP_KEEPCNT
+    flags = 10;
+    if (setsockopt(ret, IPPROTO_TCP, TCP_KEEPCNT, &flags, sizeof flags) == -1) {
+        ERR("Setsockopt failed (%s).", strerror(errno));
+        close(ret);
+        return -1;
+    }
+#endif
 
     if (idx) {
         *idx = i;
@@ -345,9 +369,9 @@ nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout, ch
     /* host was requested */
     if (host) {
         if (saddr.ss_family == AF_INET) {
-            *host = malloc(15);
+            *host = malloc(INET_ADDRSTRLEN);
             if (*host) {
-                if (!inet_ntop(AF_INET, &((struct sockaddr_in *)&saddr)->sin_addr.s_addr, *host, 15)) {
+                if (!inet_ntop(AF_INET, &((struct sockaddr_in *)&saddr)->sin_addr.s_addr, *host, INET_ADDRSTRLEN)) {
                     ERR("inet_ntop failed (%s).", strerror(errno));
                     free(*host);
                     *host = NULL;
@@ -362,7 +386,7 @@ nc_sock_accept_binds(struct nc_bind *binds, uint16_t bind_count, int timeout, ch
         } else if (saddr.ss_family == AF_INET6) {
             *host = malloc(INET6_ADDRSTRLEN);
             if (*host) {
-                if (!inet_ntop(AF_INET6, ((struct sockaddr_in6 *)&saddr)->sin6_addr.s6_addr, *host, 40)) {
+                if (!inet_ntop(AF_INET6, ((struct sockaddr_in6 *)&saddr)->sin6_addr.s6_addr, *host, INET6_ADDRSTRLEN)) {
                     ERR("inet_ntop failed (%s).", strerror(errno));
                     free(*host);
                     *host = NULL;
@@ -467,6 +491,7 @@ API int
 nc_server_init(struct ly_ctx *ctx)
 {
     const struct lys_node *rpc;
+    pthread_rwlockattr_t  attr;
 
     if (!ctx) {
         ERRARG("ctx");
@@ -492,6 +517,23 @@ nc_server_init(struct ly_ctx *ctx)
     server_opts.new_session_id = 1;
     pthread_spin_init(&server_opts.sid_lock, PTHREAD_PROCESS_PRIVATE);
 
+    errno=0;
+
+    if (pthread_rwlockattr_init(&attr) == 0) {
+        if (pthread_rwlockattr_setkind_np(&attr, PTHREAD_RWLOCK_PREFER_WRITER_NONRECURSIVE_NP) == 0) {
+            if (pthread_rwlock_init(&server_opts.endpt_lock, &attr) != 0) {
+                ERR("%s: failed to init rwlock(%s).", __FUNCTION__, strerror(errno));
+            }
+            if (pthread_rwlock_init(&server_opts.ch_client_lock, &attr) != 0) {
+                ERR("%s: failed to init rwlock(%s).", __FUNCTION__, strerror(errno));
+            }
+        } else {
+            ERR("%s: failed set attribute (%s).", __FUNCTION__, strerror(errno));
+        }
+        pthread_rwlockattr_destroy(&attr);
+    } else {
+        ERR("%s: failed init attribute (%s).", __FUNCTION__, strerror(errno));
+    }
     return 0;
 }
 
@@ -504,6 +546,9 @@ nc_server_destroy(void)
         lydict_remove(server_opts.ctx, server_opts.capabilities[i]);
     }
     free(server_opts.capabilities);
+    server_opts.capabilities = NULL;
+    server_opts.capabilities_count = 0;
+
     pthread_spin_destroy(&server_opts.sid_lock);
 
 #if defined(NC_ENABLED_SSH) || defined(NC_ENABLED_TLS)
@@ -513,20 +558,28 @@ nc_server_destroy(void)
     if (server_opts.passwd_auth_data && server_opts.passwd_auth_data_free) {
         server_opts.passwd_auth_data_free(server_opts.passwd_auth_data);
     }
+    server_opts.passwd_auth_data = NULL;
+    server_opts.passwd_auth_data_free = NULL;
 
     nc_server_ssh_del_authkey(NULL, NULL, 0, NULL);
 
     if (server_opts.hostkey_data && server_opts.hostkey_data_free) {
         server_opts.hostkey_data_free(server_opts.hostkey_data);
     }
+    server_opts.hostkey_data = NULL;
+    server_opts.hostkey_data_free = NULL;
 #endif
 #ifdef NC_ENABLED_TLS
     if (server_opts.server_cert_data && server_opts.server_cert_data_free) {
         server_opts.server_cert_data_free(server_opts.server_cert_data);
     }
+    server_opts.server_cert_data = NULL;
+    server_opts.server_cert_data_free = NULL;
     if (server_opts.trusted_cert_list_data && server_opts.trusted_cert_list_data_free) {
         server_opts.trusted_cert_list_data_free(server_opts.trusted_cert_list_data);
     }
+    server_opts.trusted_cert_list_data = NULL;
+    server_opts.trusted_cert_list_data_free = NULL;
 #endif
     nc_destroy();
 }
@@ -1188,7 +1241,7 @@ static int
 nc_ps_poll_session_io(struct nc_session *session, int io_timeout, time_t now_mono, char *msg)
 {
     struct pollfd pfd;
-    int r, ret;
+    int r, ret = 0;
 #ifdef NC_ENABLED_SSH
     struct nc_session *new;
 #endif
@@ -2228,6 +2281,7 @@ nc_server_ch_client_add_endpt(const char *client_name, const char *endpt_name)
     client->ch_endpts[client->ch_endpt_count - 1].name = lydict_insert(server_opts.ctx, endpt_name, 0);
     client->ch_endpts[client->ch_endpt_count - 1].address = NULL;
     client->ch_endpts[client->ch_endpt_count - 1].port = 0;
+    client->ch_endpts[client->ch_endpt_count - 1].sock_pending = -1;
 
     /* UNLOCK */
     nc_server_ch_client_unlock(client);
@@ -2258,6 +2312,9 @@ nc_server_ch_client_del_endpt(const char *client_name, const char *endpt_name)
         for (i = 0; i < client->ch_endpt_count; ++i) {
             lydict_remove(server_opts.ctx, client->ch_endpts[i].name);
             lydict_remove(server_opts.ctx, client->ch_endpts[i].address);
+            if (client->ch_endpts[i].sock_pending != -1) {
+                close(client->ch_endpts[i].sock_pending);
+            }
         }
         free(client->ch_endpts);
         client->ch_endpts = NULL;
@@ -2643,10 +2700,12 @@ nc_connect_ch_client_endpt(struct nc_ch_client *client, struct nc_ch_endpt *endp
     int sock, ret;
     struct timespec ts_cur;
 
-    sock = nc_sock_connect(endpt->address, endpt->port);
+    sock = nc_sock_connect(endpt->address, endpt->port, 5, &endpt->sock_pending);
     if (sock < 0) {
         return NC_MSG_ERROR;
     }
+    /* no need to store the socket as pending any longer */
+    endpt->sock_pending = -1;
 
     *session = nc_new_session(NC_SERVER, 0);
     if (!(*session)) {

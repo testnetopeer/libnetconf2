@@ -169,6 +169,14 @@ struct nc_server_opts {
     int (*passwd_auth_clb)(const struct nc_session *session, const char *password, void *user_data);
     void *passwd_auth_data;
     void (*passwd_auth_data_free)(void *data);
+
+    int (*pubkey_auth_clb)(const struct nc_session *session, ssh_key key, void *user_data);
+    void *pubkey_auth_data;
+    void (*pubkey_auth_data_free)(void *data);
+
+    int (*interactive_auth_clb)(const struct nc_session *session, ssh_message msg, void *user_data);
+    void *interactive_auth_data;
+    void (*interactive_auth_data_free)(void *data);
 #endif
 #ifdef NC_ENABLED_TLS
     int (*user_verify_clb)(const struct nc_session *session);
@@ -230,6 +238,7 @@ struct nc_server_opts {
             const char *name;
             const char *address;
             uint16_t port;
+            int sock_pending;
         } *ch_endpts;
         uint16_t ch_endpt_count;
         union {
@@ -516,9 +525,11 @@ NC_MSG_TYPE nc_handshake_io(struct nc_session *session);
  *
  * @param[in] host Hostname to connect to.
  * @param[in] port Port to connect on.
+ * @param[in] timeout for blocking the connect+select call (-1 for infinite).
+ * @param[in] sock_pending for exchanging the pending socket, if the blocking timeout was != -1
  * @return Connected socket or -1 on error.
  */
-int nc_sock_connect(const char *host, uint16_t port);
+int nc_sock_connect(const char *host, uint16_t port, int timeout, int* sock_pending);
 
 /**
  * @brief Accept a new socket connection.
