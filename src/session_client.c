@@ -292,7 +292,9 @@ retrieve_schema_data_localfile(const char *name, const char *rev, struct clb_dat
     long length, l;
     char *model_data = NULL;
 
-    if (lys_search_localfile(ly_ctx_get_searchdirs(clb_data->session->ctx), name, rev, &localfile, format)) {
+    if (lys_search_localfile(ly_ctx_get_searchdirs(clb_data->session->ctx),
+                             !(ly_ctx_get_options(clb_data->session->ctx) & LY_CTX_DISABLE_SEARCHDIR_CWD),
+                             name, rev, &localfile, format)) {
         return NULL;
     }
     if (localfile) {
@@ -307,6 +309,13 @@ retrieve_schema_data_localfile(const char *name, const char *rev, struct clb_dat
 
         fseek(f, 0, SEEK_END);
         length = ftell(f);
+        if (length < 0) {
+            ERR("Session %u: unable to get size of schema file \"%s\".",
+                clb_data->session->id, localfile);
+            free(localfile);
+            fclose(f);
+            return NULL;
+        }
         fseek(f, 0, SEEK_SET);
 
         model_data = malloc(length + 1);
@@ -476,15 +485,15 @@ retrieve_schema_data(const char *mod_name, const char *mod_rev, const char *subm
         name = submod_name;
         if (sub_rev) {
             rev = sub_rev;
-        } else {
-            if (!clb_data->schemas[u].submodules) {
+        } else if (match) {
+            if (!clb_data->schemas[match - 1].submodules) {
                 ERR("Session %u: requested submodule \"%s\" is not known for schema \"%s\" on server side.",
                     clb_data->session->id, submod_name, mod_name);
                 return NULL;
             }
-            for (v = 0; clb_data->schemas[u].submodules[v].name; ++v) {
-                if (!strcmp(submod_name, clb_data->schemas[u].submodules[v].name)) {
-                    rev = sub_rev = clb_data->schemas[u].submodules[v].revision;
+            for (v = 0; clb_data->schemas[match - 1].submodules[v].name; ++v) {
+                if (!strcmp(submod_name, clb_data->schemas[match - 1].submodules[v].name)) {
+                    rev = sub_rev = clb_data->schemas[match - 1].submodules[v].revision;
                 }
             }
             if (!rev) {
@@ -704,7 +713,8 @@ build_schema_info_yl(struct nc_session *session)
     c = modules ? modules->number : 0;
     result = calloc(c + 1, sizeof *result);
     if (!result) {
-        return NULL;
+        ERRMEM;
+        goto cleanup;
     }
 
     for (u = 0; u < c; ++u) {
@@ -743,6 +753,10 @@ build_schema_info_cpblts(char **cpblts)
 
     for (u = 0; cpblts[u]; ++u);
     result = calloc(u + 1, sizeof *result);
+    if (!result) {
+        ERRMEM;
+        return NULL;
+    }
 
     for (u = v = 0; cpblts[u]; ++u) {
         module_cpblt = strstr(cpblts[u], "module=");
